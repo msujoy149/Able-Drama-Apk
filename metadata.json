@@ -1,0 +1,6 @@
+{
+  "name": "Able Drama",
+  "description": "The ultimate Web Companion for browsing and downloading your favorite dramas, movies, and web series.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
