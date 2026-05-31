@@ -17,6 +17,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.*
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.BorderStroke
@@ -64,9 +65,13 @@ import com.example.data.AppDatabase
 import com.example.data.Bookmark
 import com.example.data.BrowserRepository
 import com.example.data.HistoryItem
+import com.example.data.DownloadRepository
 import com.example.ui.BrowserViewModel
 import com.example.ui.BrowserViewModelFactory
 import com.example.ui.components.AdvancedWebView
+import com.example.ui.components.DownloadFileDialog
+import com.example.ui.components.DownloadManagerDialog
+import com.example.util.DownloadEngine
 import androidx.compose.ui.text.TextStyle
 import com.example.ui.theme.*
 import androidx.compose.ui.graphics.graphicsLayer
@@ -221,6 +226,8 @@ class MainActivity : ComponentActivity() {
         ).fallbackToDestructiveMigration(dropAllTables = true).build()
 
         val repository = BrowserRepository(db.browserDao())
+        val downloadRepository = DownloadRepository(db.downloadDao())
+        DownloadEngine.init(downloadRepository)
         val networkMonitor = NetworkMonitor(applicationContext)
 
         // Pre-create/retrieve the BrowserViewModel so that the Activity can access it for clipboard redirection
@@ -235,72 +242,86 @@ class MainActivity : ComponentActivity() {
             }
 
             MyApplicationTheme(darkTheme = isDarkTheme) {
-                // Track FullScreen video client components
-                var isHtmlVideoFullscreen by remember { mutableStateOf(false) }
+                var showSplashScreen by remember { mutableStateOf(true) }
 
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    if (isHtmlVideoFullscreen) {
-                        // Display native player container taking full screens
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Color.Black)
+                LaunchedEffect(Unit) {
+                    delay(1500L) // Elegant 1.5s splash loading screen
+                    showSplashScreen = false
+                }
+
+                Crossfade(targetState = showSplashScreen, label = "SplashTransition") { isSplash ->
+                    if (isSplash) {
+                        SplashScreen(isDarkTheme = isDarkTheme)
+                    } else {
+                        // Track FullScreen video client components
+                        var isHtmlVideoFullscreen by remember { mutableStateOf(false) }
+
+                        Surface(
+                            modifier = Modifier.fillMaxSize(),
+                            color = MaterialTheme.colorScheme.background
                         ) {
-                            AndroidView(
-                                factory = { ctx ->
-                                    FrameLayout(ctx).apply {
-                                        fullscreenContainer = this
-                                        customView?.let { view ->
-                                            (view.parent as? ViewGroup)?.removeView(view)
-                                            addView(view)
-                                        }
+                            if (isHtmlVideoFullscreen) {
+                                // Display native player container taking full screens
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Color.Black)
+                                ) {
+                                    AndroidView(
+                                        factory = { ctx ->
+                                            FrameLayout(ctx).apply {
+                                                fullscreenContainer = this
+                                                customView?.let { view ->
+                                                    (view.parent as? ViewGroup)?.removeView(view)
+                                                    addView(view)
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    
+                                    // Exit fullscreen button floating top bar
+                                    IconButton(
+                                        onClick = {
+                                            hideVideoFullscreen()
+                                            isHtmlVideoFullscreen = false
+                                        },
+                                        modifier = Modifier
+                                            .padding(safeDrawingPadding())
+                                            .align(Alignment.TopEnd)
+                                            .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.FullscreenExit,
+                                            contentDescription = "Exit Fullscreen",
+                                            tint = Color.White
+                                        )
                                     }
-                                },
-                                modifier = Modifier.fillMaxSize()
-                            )
-                            
-                            // Exit fullscreen button floating top bar
-                            IconButton(
-                                onClick = {
-                                    hideVideoFullscreen()
-                                    isHtmlVideoFullscreen = false
-                                },
-                                modifier = Modifier
-                                    .padding(safeDrawingPadding())
-                                    .align(Alignment.TopEnd)
-                                    .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.FullscreenExit,
-                                    contentDescription = "Exit Fullscreen",
-                                    tint = Color.White
+                                }
+                            } else {
+                                // Regular interactive view layers
+                                MainAppContent(
+                                    viewModel = browserViewModel!!,
+                                    downloadRepository = downloadRepository,
+                                    networkMonitor = networkMonitor,
+                                    isDarkTheme = isDarkTheme,
+                                    onToggleDarkTheme = {
+                                        val nextTheme = !isDarkTheme
+                                        isDarkTheme = nextTheme
+                                        prefs.edit().putBoolean("is_dark_theme", nextTheme).apply()
+                                    },
+                                    onShowCustomView = { view, callback ->
+                                        customView = view
+                                        customViewCallback = callback
+                                        isHtmlVideoFullscreen = true
+                                    },
+                                    onHideCustomView = {
+                                        hideVideoFullscreen()
+                                        isHtmlVideoFullscreen = false
+                                    }
                                 )
                             }
                         }
-                    } else {
-                        // Regular interactive view layers
-                        MainAppContent(
-                            viewModel = browserViewModel!!,
-                            networkMonitor = networkMonitor,
-                            isDarkTheme = isDarkTheme,
-                            onToggleDarkTheme = {
-                                val nextTheme = !isDarkTheme
-                                isDarkTheme = nextTheme
-                                prefs.edit().putBoolean("is_dark_theme", nextTheme).apply()
-                            },
-                            onShowCustomView = { view, callback ->
-                                customView = view
-                                customViewCallback = callback
-                                isHtmlVideoFullscreen = true
-                            },
-                            onHideCustomView = {
-                                hideVideoFullscreen()
-                                isHtmlVideoFullscreen = false
-                            }
-                        )
                     }
                 }
             }
@@ -340,6 +361,7 @@ enum class BottomNavItem {
 @Composable
 fun MainAppContent(
     viewModel: BrowserViewModel,
+    downloadRepository: DownloadRepository,
     networkMonitor: NetworkMonitor,
     isDarkTheme: Boolean,
     onToggleDarkTheme: () -> Unit,
@@ -366,6 +388,11 @@ fun MainAppContent(
 
     var inputUrl by remember { mutableStateOf(currentUrl) }
     val focusManager = LocalFocusManager.current
+
+    val coroutineScope = rememberCoroutineScope()
+    var showDownloadFileDialog by remember { mutableStateOf(false) }
+    var downloadPendingUrl by remember { mutableStateOf("") }
+    var showDownloadManagerDialog by remember { mutableStateOf(false) }
 
     // Bookmark overlay state and auto-hide timer for post URLs
     var isBookmarkOverlayVisible by remember { mutableStateOf(false) }
@@ -430,6 +457,11 @@ fun MainAppContent(
                 lowercaseUrl.contains("/label/web%20series") || lowercaseUrl.contains("/label/web_series") || lowercaseUrl.contains("/category/web-series") || lowercaseUrl.contains("/search/label/web") -> selectedBottomItem = BottomNavItem.WEB_SERIES
                 lowercaseUrl.contains("/label/short%20drama") || lowercaseUrl.contains("/label/short_drama") || lowercaseUrl.contains("/category/short-drama") -> selectedBottomItem = BottomNavItem.SHORT_DRAMA
                 lowercaseUrl.contains("/label/anime") || lowercaseUrl.contains("/category/anime") -> selectedBottomItem = BottomNavItem.ANIME
+                else -> {
+                    if (selectedBottomItem == BottomNavItem.ACCOUNT) {
+                        selectedBottomItem = BottomNavItem.MOVIES
+                    }
+                }
             }
         } else {
             selectedBottomItem = BottomNavItem.ACCOUNT
@@ -511,13 +543,17 @@ fun MainAppContent(
                             onShowCustomView = onShowCustomView,
                             onHideCustomView = onHideCustomView,
                             modifier = Modifier.fillMaxSize().testTag("movie_web_view"),
-                            onDoubleTap = {
+                            onSingleTap = {
                                 if (isCurrentUrlAPost) {
                                     isBookmarkOverlayVisible = !isBookmarkOverlayVisible
                                     if (isBookmarkOverlayVisible) {
                                         bookmarkTimerTrigger++
                                     }
                                 }
+                            },
+                            onDownloadRequested = { url, contentDisposition, mimeType, contentLength ->
+                                downloadPendingUrl = url
+                                showDownloadFileDialog = true
                             }
                         )
 
@@ -559,7 +595,7 @@ fun MainAppContent(
                                     Icon(
                                         imageVector = if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.Bookmark,
                                         contentDescription = "Bookmark",
-                                        tint = if (isBookmarked) CinemaRed else MaterialTheme.colorScheme.onSurface,
+                                        tint = if (isBookmarked) Color(0xFFE50914) else MaterialTheme.colorScheme.onSurface,
                                         modifier = Modifier.size(26.dp)
                                     )
                                 }
@@ -590,12 +626,33 @@ fun MainAppContent(
                                 } catch (e: Exception) {
                                     Toast.makeText(context, "Email application not found on this device.", Toast.LENGTH_SHORT).show()
                                 }
+                            },
+                            onDownloadClick = {
+                                showDownloadManagerDialog = true
                             }
                         )
                     }
                 }
             }
         }
+    }
+
+    // Custom Downloader Dialogs
+    if (showDownloadFileDialog) {
+        DownloadFileDialog(
+            initialUrl = downloadPendingUrl,
+            onDismissRequest = { showDownloadFileDialog = false },
+            downloadRepository = downloadRepository,
+            coroutineScope = coroutineScope
+        )
+    }
+
+    if (showDownloadManagerDialog) {
+        DownloadManagerDialog(
+            onDismissRequest = { showDownloadManagerDialog = false },
+            downloadRepository = downloadRepository,
+            coroutineScope = coroutineScope
+        )
     }
 
     // Telegram Community Join Promo Dialog
@@ -737,7 +794,7 @@ fun HeaderBrandBar(
                     Icon(
                         imageVector = if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.Bookmark,
                         contentDescription = "Bookmark present page",
-                        tint = if (isBookmarked) CinemaGold else Color.White
+                        tint = if (isBookmarked) Color(0xFFE50914) else Color.White
                     )
                 }
 
@@ -865,7 +922,7 @@ fun BrowserToolbar(
                 Icon(
                     imageVector = if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.Bookmark,
                     contentDescription = "Bookmark present page",
-                    tint = if (isBookmarked) CinemaGold else Color.Gray,
+                    tint = if (isBookmarked) Color(0xFFE50914) else Color.Gray,
                     modifier = Modifier.size(20.dp)
                 )
             }
@@ -978,7 +1035,8 @@ fun MyAccountTab(
     onDeleteBookmark: (String) -> Unit,
     onDeleteHistory: (Int) -> Unit,
     onClearHistory: () -> Unit,
-    onEmailFeedback: () -> Unit
+    onEmailFeedback: () -> Unit,
+    onDownloadClick: () -> Unit = {}
 ) {
     var showBookmarksDialog by remember { mutableStateOf(false) }
     var showHistoryDialog by remember { mutableStateOf(false) }
@@ -1323,17 +1381,17 @@ fun MyAccountTab(
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(54.dp)
-                                    .clip(CircleShape)
-                                    .background(Brush.radialGradient(listOf(CinemaRed, MaterialTheme.colorScheme.surface)))
+                                    .size(60.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
                                     .padding(2.dp)
                             ) {
                                 Image(
-                                    painter = painterResource(id = R.drawable.cinema_app_icon_1780133010442),
+                                    painter = painterResource(id = R.drawable.img_app_logo_1780217782245),
                                     contentDescription = "App Logo",
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .clip(CircleShape)
+                                        .clip(RoundedCornerShape(8.dp))
                                 )
                             }
 
@@ -1458,14 +1516,7 @@ fun MyAccountTab(
                                         }
                                     }
 
-                                    try {
-                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)).apply {
-                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                        }
-                                        context.startActivity(intent)
-                                    } catch (e: Exception) {
-                                        Toast.makeText(context, "Cannot open: $targetUrl", Toast.LENGTH_SHORT).show()
-                                    }
+                                    onSectionClick(targetUrl)
                                 } else {
                                     Toast.makeText(context, "Please enter or paste a link first", Toast.LENGTH_SHORT).show()
                                 }
@@ -1498,6 +1549,83 @@ fun MyAccountTab(
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Premium Highlighted Download Manager Section (High-conspicuous, as drawn in user's image)
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onDownloadClick() }
+                    .testTag("portal_download_manager_card"),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.2.dp, CinemaGold.copy(alpha = 0.5f))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(CinemaGold.copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = "Download Manager",
+                            tint = CinemaGold,
+                            modifier = Modifier.size(26.dp)
+                        )
+                    }
+                    
+                    Spacer(modifier = Modifier.width(16.dp))
+                    
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Download Manager",
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            // Badge with 1DM text
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(CinemaGold.copy(alpha = 0.2f))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "1DM",
+                                    color = CinemaGold,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "সব মুভি ডাউনলোডের চমৎকার পোর্টাল (পজ এবং রিজুম সহ)",
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Icon(
+                        imageVector = Icons.Default.ChevronRight,
+                        contentDescription = "Navigate to downloads",
+                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
             }
         }
@@ -1559,6 +1687,8 @@ fun MyAccountTab(
                     .clickable {
                         if (sec.titleEnglish == "History") {
                             showHistoryDialog = true
+                        } else if (sec.titleEnglish == "Download") {
+                            onDownloadClick()
                         } else {
                             onSectionClick(sec.url)
                         }
@@ -1676,7 +1806,7 @@ fun MyAccountTab(
                         Icon(
                             imageVector = Icons.Default.Bookmark,
                             contentDescription = "Bookmarks",
-                            tint = CinemaGold,
+                            tint = if (bookmarks.isNotEmpty()) Color(0xFFE50914) else CinemaGold,
                             modifier = Modifier.size(24.dp)
                         )
                         Spacer(modifier = Modifier.height(8.dp))
@@ -2778,5 +2908,57 @@ data class CategoryItem(
             "web series" -> "web-series"
             else -> "movies"
         }
+}
+
+@Composable
+fun SplashScreen(isDarkTheme: Boolean) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(if (isDarkTheme) Color(0xFF15121F) else Color(0xFFF9F9FB)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            // Perfect beautiful circle app logo
+            Box(
+                modifier = Modifier
+                    .size(140.dp)
+                    .clip(CircleShape)
+                    .background(if (isDarkTheme) Color(0xFF1E1A30) else Color(0xFFEEEEF2))
+                    .padding(4.dp)
+            ) {
+                Image(
+                    painter = painterResource(id = R.drawable.img_app_logo_1780217782245),
+                    contentDescription = "App Logo",
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape),
+                    contentScale = ContentScale.Crop
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(24.dp))
+            
+            Text(
+                text = "ABLE DRAMA",
+                color = CinemaRed,
+                fontSize = 24.sp,
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = 4.sp
+            )
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            Text(
+                text = "Ad-free Safe Streaming",
+                color = if (isDarkTheme) Color.LightGray else Color.DarkGray,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
 }
 

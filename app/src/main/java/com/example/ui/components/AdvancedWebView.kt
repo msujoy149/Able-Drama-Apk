@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ViewGroup
@@ -26,6 +28,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -41,9 +44,23 @@ fun AdvancedWebView(
     modifier: Modifier = Modifier,
     onShowCustomView: (android.view.View, WebChromeClient.CustomViewCallback) -> Unit = { _, _ -> },
     onHideCustomView: () -> Unit = {},
-    onDoubleTap: () -> Unit = {}
+    onSingleTap: () -> Unit = {},
+    onDownloadRequested: (url: String, contentDisposition: String?, mimeType: String?, contentLength: Long) -> Unit = { _, _, _, _ -> }
 ) {
     val context = LocalContext.current
+    
+    val currentOnShowCustomView by rememberUpdatedState(onShowCustomView)
+    val currentOnHideCustomView by rememberUpdatedState(onHideCustomView)
+    val currentOnSingleTap by rememberUpdatedState(onSingleTap)
+
+    val gestureDetector = remember(context) {
+        GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                currentOnSingleTap()
+                return false
+            }
+        }, Handler(Looper.getMainLooper()))
+    }
     
     // Remember the WebView instance so it persists across recompositions
     val webView = remember {
@@ -70,51 +87,16 @@ fun AdvancedWebView(
                 mediaPlaybackRequiresUserGesture = false
             }
 
-            // Standard Download listener for movies
+            // Custom Download listener to show 1DM style Downloader Dialog
             setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
-                try {
-                    val request = DownloadManager.Request(Uri.parse(url)).apply {
-                        val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
-                        setTitle(fileName)
-                        setDescription("Downloading cinema file...")
-                        setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                        setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-                        addRequestHeader("User-Agent", userAgent)
-                        
-                        // Enable scanning by MediaScanner to index content
-                        allowScanningByMediaScanner()
-                    }
-                    
-                    val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-                    downloadManager.enqueue(request)
-                    Toast.makeText(context, "Movie download started...", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Toast.makeText(context, "Failed to start download: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
-                    // Fallback to opening in external browser
-                    try {
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                        context.startActivity(intent)
-                    } catch (ex: Exception) {
-                        Toast.makeText(context, "No app available to handle this link.", Toast.LENGTH_SHORT).show()
-                    }
-                }
+                onDownloadRequested(url, contentDisposition, mimeType, contentLength)
             }
-        }
-    }
 
-    val gestureDetector = remember(context, onDoubleTap) {
-        GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onDoubleTap(e: MotionEvent): Boolean {
-                onDoubleTap()
-                return false
+            // Set Touch Listener exactly ONCE during initialization
+            setOnTouchListener { _, event ->
+                gestureDetector.onTouchEvent(event)
+                false
             }
-        })
-    }
-
-    LaunchedEffect(gestureDetector) {
-        webView.setOnTouchListener { _, event ->
-            gestureDetector.onTouchEvent(event)
-            false
         }
     }
 
@@ -177,6 +159,21 @@ fun AdvancedWebView(
             super.onReceivedError(view, request, error)
             // Error handling can trigger specific offline pages or messages
         }
+
+        override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+            android.util.Log.e("AdvancedWebView", "WebView render process gone. Handled to prevent host crash.")
+            try {
+                if (view != null) {
+                    val parent = view.parent as? android.view.ViewGroup
+                    parent?.removeView(view)
+                    view.destroy()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            viewModel.reload()
+            return true
+        }
     }
 
     webView.webChromeClient = object : WebChromeClient() {
@@ -193,12 +190,12 @@ fun AdvancedWebView(
         // Full Screen video support
         override fun onShowCustomView(view: android.view.View?, callback: CustomViewCallback?) {
             if (view != null && callback != null) {
-                onShowCustomView(view, callback)
+                currentOnShowCustomView(view, callback)
             }
         }
 
         override fun onHideCustomView() {
-            onHideCustomView()
+            currentOnHideCustomView()
         }
     }
 

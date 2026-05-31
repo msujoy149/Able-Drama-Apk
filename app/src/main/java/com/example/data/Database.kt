@@ -19,6 +19,25 @@ data class HistoryItem(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+@Entity(tableName = "downloads")
+data class DownloadItem(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val url: String,
+    val fileName: String,
+    val filePath: String,
+    val fileSize: Long,
+    val bytesDownloaded: Long,
+    val isResumeSupported: Boolean,
+    val status: String, // "DOWNLOADING", "FINISHED", "PAUSED", "ERROR"
+    val progress: Float, // 0.0 - 100.0
+    val downloadSpeed: String = "0 KB/s",
+    val eta: String = "--",
+    val timestamp: Long = System.currentTimeMillis(),
+    val useWebpageTitle: Boolean = true,
+    val wifiOnly: Boolean = false,
+    val retryOnFail: Boolean = true
+)
+
 @Dao
 interface BrowserDao {
     // Bookmarks entries
@@ -54,7 +73,30 @@ interface BrowserDao {
     suspend fun clearHistory()
 }
 
-@Database(entities = [Bookmark::class, HistoryItem::class], version = 1, exportSchema = false)
+@Dao
+interface DownloadDao {
+    @Query("SELECT * FROM downloads ORDER BY timestamp DESC")
+    fun getAllDownloads(): Flow<List<DownloadItem>>
+
+    @Query("SELECT * FROM downloads WHERE id = :id")
+    suspend fun getDownloadById(id: Long): DownloadItem?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDownload(item: DownloadItem): Long
+
+    @Update
+    suspend fun updateDownload(item: DownloadItem)
+
+    @Delete
+    suspend fun deleteDownload(item: DownloadItem)
+
+    @Query("DELETE FROM downloads WHERE id = :id")
+    suspend fun deleteDownloadById(id: Long)
+}
+
+@Database(entities = [Bookmark::class, HistoryItem::class, DownloadItem::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun browserDao(): BrowserDao
+    abstract fun downloadDao(): DownloadDao
 }
+

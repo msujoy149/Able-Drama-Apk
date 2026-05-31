@@ -38,3 +38,18 @@ class BrowserRepository(private val dao: BrowserDao) {
         dao.clearHistory()
     }
 }
+
+class DownloadRepository(private val dao: DownloadDao) {
+    val allDownloads: Flow<List<DownloadItem>> = dao.getAllDownloads()
+
+    suspend fun getDownloadById(id: Long): DownloadItem? = dao.getDownloadById(id)
+
+    suspend fun insertDownload(item: DownloadItem): Long = dao.insertDownload(item)
+
+    suspend fun updateDownload(item: DownloadItem) = dao.updateDownload(item)
+
+    suspend fun deleteDownload(item: DownloadItem) = dao.deleteDownload(item)
+
+    suspend fun deleteDownloadById(id: Long) = dao.deleteDownloadById(id)
+}
+
