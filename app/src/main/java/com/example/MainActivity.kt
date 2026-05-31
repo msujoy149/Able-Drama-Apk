@@ -657,79 +657,108 @@ fun MainAppContent(
 
     // Telegram Community Join Promo Dialog
     if (showTelegramDialog) {
-        AlertDialog(
+        Dialog(
             onDismissRequest = { showTelegramDialog = false },
-            containerColor = DarkVacuum,
-            icon = {
-                Box(
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
                     modifier = Modifier
-                        .size(56.dp)
-                        .clip(CircleShape)
-                        .background(CinemaRed.copy(alpha = 0.2f)),
-                    contentAlignment = Alignment.Center
+                        .widthIn(max = 420.dp)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(24.dp))
+                        .testTag("telegram_promo_dialog"),
+                    colors = CardDefaults.cardColors(containerColor = DarkVacuum),
+                    border = BorderStroke(1.2.dp, CinemaRed.copy(alpha = 0.5f))
                 ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Telegram Community",
-                        tint = CinemaRed,
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
-            },
-            title = {
-                Text(
-                    text = "Join Our Official Telegram",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            },
-            text = {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "Join our official Telegram channel now to get instant movie requests, direct high-speed links, series updates, and developer support!",
-                        color = Color.LightGray,
-                        fontSize = 13.sp,
-                        textAlign = TextAlign.Center,
-                        lineHeight = 18.sp
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "Auto-closing in ${telegramCountdown}s...",
-                        color = CinemaGold,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showTelegramDialog = false
-                        try {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/+Cg68mwS78D8yNzRl"))
-                            context.startActivity(intent)
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "Cannot open Telegram link", Toast.LENGTH_SHORT).show()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .background(CinemaRed.copy(alpha = 0.2f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = "Telegram Community",
+                                tint = CinemaRed,
+                                modifier = Modifier.size(28.dp)
+                            )
                         }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = CinemaRed),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("Join Now", color = Color.White, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showTelegramDialog = false }) {
-                    Text("Dismiss", color = Color.Gray)
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Text(
+                            text = "Join Our Official Telegram",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Text(
+                            text = "Join our official Telegram channel now to get instant movie requests, direct high-speed links, series updates, and developer support!",
+                            color = Color.LightGray,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center,
+                            lineHeight = 18.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        Text(
+                            text = "Auto-closing in ${telegramCountdown}s...",
+                            color = CinemaGold,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(onClick = { showTelegramDialog = false }) {
+                                Text("Dismiss", color = Color.Gray, fontWeight = FontWeight.SemiBold)
+                            }
+
+                            Button(
+                                onClick = {
+                                    showTelegramDialog = false
+                                    try {
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/+Cg68mwS78D8yNzRl"))
+                                        context.startActivity(intent)
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Cannot open Telegram link", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = CinemaRed),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text("Join Now", color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
                 }
             }
-        )
+        }
     }
 }
 
@@ -1611,13 +1640,6 @@ fun MyAccountTab(
                                 )
                             }
                         }
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "সব মুভি ডাউনলোডের চমৎকার পোর্টাল (পজ এবং রিজুম সহ)",
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
                     }
 
                     Icon(
