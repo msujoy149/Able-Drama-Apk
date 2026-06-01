@@ -1,12 +1,41 @@
 <div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
+<img width="1200" height="475" alt="GHBanner" src="https://i.postimg.cc/sDC39G08/Able-Drama-Logo-New.png" />
 </div>
 
-# Run and deploy your AI Studio app
+# 🎬 AbleDrama
 
-This contains everything you need to run your app locally.
+AbleDrama is a modern entertainment application that brings movies, dramas, web series, short dramas, and anime together in one fast, clean, and easy-to-use platform. Built with performance, simplicity, and user experience in mind, AbleDrama provides a seamless way to discover, browse, stream, and manage your favorite content.
 
-View your app in AI Studio: https://ai.studio/apps/b166a9a9-9eb7-42f6-9489-3605226efa86
+## ✨ Key Features
+
+* 🎬 Extensive Movie Collection
+* 🎭 Popular Drama Library
+* 📺 Trending Web Series
+* 🎞️ Short Drama Directory
+* 🌸 Dedicated Anime Section
+* 🔍 Smart Content Discovery
+* ⚡ Fast & Lightweight Performance
+* 📱 Mobile-Friendly Experience
+* 🎨 Clean Modern Interface
+
+## 🚀 Advanced Features
+
+* Category-based navigation for Movies, Drama, Web Series, Short Drama, and Anime
+* Advanced web engine with smooth browsing and back navigation
+* Real-time loading progress indicator
+* Built-in media download manager with download tracking
+* Local database support for downloaded content
+* Bookmark favorite pages and content
+* History management with easy access and deletion
+* My Account dashboard for bookmarks and history
+* Direct Telegram community integration
+* Optimized for Android 4.4+ devices
+* Latest Version: 2.0.0
+
+AbleDrama is designed to make entertainment simple, fast, and accessible for everyone.
+
+### 🎥 Your Gateway to Endless Entertainment.
+
 
 ## Run Locally
 
