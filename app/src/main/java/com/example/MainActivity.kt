@@ -2620,10 +2620,19 @@ fun HelpInstructionsTab(onNavigateToMirror: (String) -> Unit) {
                     )
                     
                     Text(
-                        text = "Version 1.0.0 (Web companion)",
+                        text = "Version 2.0.0",
                         color = CinemaGold,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold
+                    )
+                    
+                    Spacer(modifier = Modifier.height(2.dp))
+                    
+                    Text(
+                        text = "Required Android 4.4 up",
+                        color = CinemaGold.copy(alpha = 0.8f),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium
                     )
 
                     Spacer(modifier = Modifier.height(8.dp))
