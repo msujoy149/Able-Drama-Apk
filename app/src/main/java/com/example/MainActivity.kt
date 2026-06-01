@@ -529,11 +529,11 @@ fun MainAppContent(
             ) {
                 Column(modifier = Modifier.fillMaxSize()) {
                     // Progressive load line
-                    if (isLoading && currentTab == AppTab.BROWSER) {
+                    if (isLoading) {
                         LinearProgressIndicator(
                             progress = { loadProgress / 100f },
                             modifier = Modifier.fillMaxWidth().height(4.dp).testTag("web_load_progress"),
-                            color = CinemaRed,
+                            color = Color.Red,
                             trackColor = Color.Transparent
                         )
                     }
@@ -1027,7 +1027,7 @@ fun CustomBottomNavBar(
                 BottomNavItem.WEB_SERIES to Pair("Web Series", Icons.Default.VideoLibrary),
                 BottomNavItem.SHORT_DRAMA to Pair("Short Drama", Icons.Default.FlashOn),
                 BottomNavItem.ANIME to Pair("Anime", Icons.Default.LiveTv),
-                BottomNavItem.ACCOUNT to Pair("My Account", Icons.Default.Person)
+                BottomNavItem.ACCOUNT to Pair("Main Menu", Icons.Default.Menu)
             )
 
             navItems.forEach { (item, pair) ->

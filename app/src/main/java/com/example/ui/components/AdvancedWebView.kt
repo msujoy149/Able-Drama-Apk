@@ -32,6 +32,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -66,6 +67,7 @@ fun AdvancedWebView(
     }
     
     var webViewVersion by remember { mutableStateOf(0) }
+    var lastRecreationTime by remember { mutableStateOf(0L) }
 
     // Remember the WebView instance so it persists across recompositions
     val webView = remember(webViewVersion) {
@@ -101,6 +103,21 @@ fun AdvancedWebView(
             setOnTouchListener { _, event ->
                 gestureDetector.onTouchEvent(event)
                 false
+            }
+        }
+    }
+
+    // Clean up older webViews safely to prevent leaking native rendering contexts and memory
+    DisposableEffect(webView) {
+        onDispose {
+            try {
+                webView.stopLoading()
+                webView.clearHistory()
+                webView.removeAllViews()
+                // Let the garbage collector reclaim the WebView natively during AndroidView's normal lifecycle, 
+                // avoiding any sudden InputChannel closures while still attached.
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
@@ -176,7 +193,13 @@ fun AdvancedWebView(
             } catch (e: Exception) {
                 e.printStackTrace()
             }
-            webViewVersion++
+            val now = System.currentTimeMillis()
+            if (now - lastRecreationTime > 10000L) {
+                lastRecreationTime = now
+                webViewVersion++
+            } else {
+                android.util.Log.e("AdvancedWebView", "WebView render process crashed too frequently. Cooldown active.")
+            }
             return true
         }
     }
@@ -241,7 +264,7 @@ fun AdvancedWebView(
             factory = { webView },
             modifier = modifier.fillMaxSize(),
             update = { view ->
-                view.visibility = android.view.View.VISIBLE
+                view.visibility = if (isVisible) android.view.View.VISIBLE else android.view.View.GONE
             }
         )
     }

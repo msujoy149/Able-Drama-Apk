@@ -30,8 +30,8 @@ class ExampleRobolectricTest {
     // 1. Verify bottom navigation bar exists
     composeTestRule.onNodeWithTag("vibrant_bottom_nav_bar").assertExists()
 
-    // 2. Navigate to "My Account" tab
-    composeTestRule.onNodeWithText("My Account").assertExists().performClick()
+    // 2. Navigate to "Main Menu" tab
+    composeTestRule.onNodeWithText("Main Menu").assertExists().performClick()
 
     // 3. Check that My Account View is displayed
     composeTestRule.onNodeWithTag("my_account_view").assertExists()
@@ -48,8 +48,8 @@ class ExampleRobolectricTest {
     // Advance the clock past the 1.5s splash screen delay and the 5s Telegram dialog
     composeTestRule.mainClock.advanceTimeBy(8000L)
 
-    // Navigate to "My Account" tab
-    composeTestRule.onNodeWithText("My Account").performClick()
+    // Navigate to "Main Menu" tab
+    composeTestRule.onNodeWithText("Main Menu").performClick()
 
     // Verify My Account View is displayed
     composeTestRule.onNodeWithTag("my_account_view").assertExists()
