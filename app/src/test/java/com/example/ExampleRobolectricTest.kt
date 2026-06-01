@@ -24,8 +24,8 @@ class ExampleRobolectricTest {
 
   @Test
   fun testThemeToggleAndTabNavigation() {
-    // Advance the clock past the 1.5s splash screen delay
-    composeTestRule.mainClock.advanceTimeBy(1600L)
+    // Advance the clock past the 1.5s splash screen delay and the 5s Telegram dialog
+    composeTestRule.mainClock.advanceTimeBy(8000L)
 
     // 1. Verify bottom navigation bar exists
     composeTestRule.onNodeWithTag("vibrant_bottom_nav_bar").assertExists()
@@ -45,8 +45,8 @@ class ExampleRobolectricTest {
 
   @Test
   fun testOpenHistoryDialog() {
-    // Advance the clock past the 1.5s splash screen delay
-    composeTestRule.mainClock.advanceTimeBy(1600L)
+    // Advance the clock past the 1.5s splash screen delay and the 5s Telegram dialog
+    composeTestRule.mainClock.advanceTimeBy(8000L)
 
     // Navigate to "My Account" tab
     composeTestRule.onNodeWithText("My Account").performClick()

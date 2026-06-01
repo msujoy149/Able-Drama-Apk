@@ -29,6 +29,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -62,8 +65,10 @@ fun AdvancedWebView(
         }, Handler(Looper.getMainLooper()))
     }
     
+    var webViewVersion by remember { mutableStateOf(0) }
+
     // Remember the WebView instance so it persists across recompositions
-    val webView = remember {
+    val webView = remember(webViewVersion) {
         WebView(context).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -161,7 +166,7 @@ fun AdvancedWebView(
         }
 
         override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
-            android.util.Log.e("AdvancedWebView", "WebView render process gone. Handled to prevent host crash.")
+            android.util.Log.e("AdvancedWebView", "WebView render process gone. Recreating webView...")
             try {
                 if (view != null) {
                     val parent = view.parent as? android.view.ViewGroup
@@ -171,7 +176,7 @@ fun AdvancedWebView(
             } catch (e: Exception) {
                 e.printStackTrace()
             }
-            viewModel.reload()
+            webViewVersion++
             return true
         }
     }
@@ -200,20 +205,28 @@ fun AdvancedWebView(
     }
 
     // Collect external commands from ViewModel
-    LaunchedEffect(viewModel) {
+    LaunchedEffect(viewModel, webView) {
         viewModel.commands.collectLatest { command ->
-            when (command) {
-                is WebViewCommand.GoBack -> if (webView.canGoBack()) webView.goBack()
-                is WebViewCommand.GoForward -> if (webView.canGoForward()) webView.goForward()
-                is WebViewCommand.Reload -> webView.reload()
-                is WebViewCommand.LoadUrl -> webView.loadUrl(command.url)
+            try {
+                when (command) {
+                    is WebViewCommand.GoBack -> if (webView.canGoBack()) webView.goBack()
+                    is WebViewCommand.GoForward -> if (webView.canGoForward()) webView.goForward()
+                    is WebViewCommand.Reload -> webView.reload()
+                    is WebViewCommand.LoadUrl -> webView.loadUrl(command.url)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
 
-    // Synchronize starting URL once on initialization
-    LaunchedEffect(Unit) {
-        webView.loadUrl(viewModel.currentUrl.value)
+    // Synchronize starting URL once on initialization and on recreate
+    LaunchedEffect(webView) {
+        try {
+            webView.loadUrl(viewModel.currentUrl.value)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     // Intercept system Back button to navigate parent web stack
@@ -222,12 +235,14 @@ fun AdvancedWebView(
         viewModel.goBack()
     }
 
-    // Embed WebView into Jetpack Compose layout tree
-    AndroidView(
-        factory = { webView },
-        modifier = modifier.fillMaxSize(),
-        update = { view ->
-            view.visibility = android.view.View.VISIBLE
-        }
-    )
+    // Embed WebView into Jetpack Compose layout tree with key-controlled recreation
+    key(webViewVersion) {
+        AndroidView(
+            factory = { webView },
+            modifier = modifier.fillMaxSize(),
+            update = { view ->
+                view.visibility = android.view.View.VISIBLE
+            }
+        )
+    }
 }

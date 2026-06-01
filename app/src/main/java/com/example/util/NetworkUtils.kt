@@ -11,7 +11,12 @@ import kotlinx.coroutines.flow.callbackFlow
 
 class NetworkMonitor(private val context: Context) {
     val isOnline: Flow<Boolean> = callbackFlow {
-        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (connectivityManager == null) {
+            trySend(true)
+            awaitClose {}
+            return@callbackFlow
+        }
         
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
@@ -27,16 +32,30 @@ class NetworkMonitor(private val context: Context) {
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
         
-        connectivityManager.registerNetworkCallback(request, callback)
+        try {
+            connectivityManager.registerNetworkCallback(request, callback)
+        } catch (t: Throwable) {
+            android.util.Log.e("NetworkMonitor", "Failed to register network callback safely", t)
+            trySend(true)
+        }
 
-        // Set initial state
-        val activeNetwork = connectivityManager.activeNetwork
-        val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
-        val hasInternet = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        // Set initial state safely
+        var hasInternet = true
+        try {
+            val activeNetwork = connectivityManager.activeNetwork
+            val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
+            hasInternet = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        } catch (t: Throwable) {
+            android.util.Log.e("NetworkMonitor", "Failed to determine initial network state safely", t)
+        }
         trySend(hasInternet)
 
         awaitClose {
-            connectivityManager.unregisterNetworkCallback(callback)
+            try {
+                connectivityManager.unregisterNetworkCallback(callback)
+            } catch (t: Throwable) {
+                android.util.Log.e("NetworkMonitor", "Failed to unregister network callback safely", t)
+            }
         }
     }
 }

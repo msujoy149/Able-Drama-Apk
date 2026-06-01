@@ -105,11 +105,30 @@ class MainActivity : ComponentActivity() {
     private fun checkClipboardAndRedirect() {
         if (!isActivityResumed || !hasWindowFocus()) return
         try {
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-            if (clipboard != null && clipboard.hasPrimaryClip()) {
-                val clipData = clipboard.primaryClip
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+            
+            val hasClip = try {
+                clipboard.hasPrimaryClip()
+            } catch (t: Throwable) {
+                android.util.Log.e("ClipboardSafe", "Failed to check hasPrimaryClip safely", t)
+                false
+            }
+            
+            if (hasClip) {
+                val clipData = try {
+                    clipboard.primaryClip
+                } catch (t: Throwable) {
+                    android.util.Log.e("ClipboardSafe", "Failed to get primaryClip safely", t)
+                    null
+                }
+                
                 if (clipData != null && clipData.itemCount > 0) {
-                    val copiedText = clipData.getItemAt(0).text?.toString()?.trim()
+                    val firstItem = try {
+                        clipData.getItemAt(0)
+                    } catch (t: Throwable) {
+                        null
+                    }
+                    val copiedText = firstItem?.text?.toString()?.trim()
                     if (!copiedText.isNullOrEmpty()) {
                         val urlCandidate = extractUrl(copiedText)
                         if (urlCandidate != null) {
@@ -138,8 +157,8 @@ class MainActivity : ComponentActivity() {
             } else {
                 isInitialCaptureDone = true
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (t: Throwable) {
+            android.util.Log.e("ClipboardSafe", "Exception in clipboard check redirection", t)
         }
     }
 
@@ -189,8 +208,8 @@ class MainActivity : ComponentActivity() {
         try {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             clipboard?.addPrimaryClipChangedListener(clipboardListener)
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (t: Throwable) {
+            android.util.Log.e("ClipboardSafe", "Failed to add clipboard listener safely", t)
         }
     }
 
@@ -201,8 +220,8 @@ class MainActivity : ComponentActivity() {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             clipboard?.removePrimaryClipChangedListener(clipboardListener)
             handler.removeCallbacks(checkClipboardRunnable)
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (t: Throwable) {
+            android.util.Log.e("ClipboardSafe", "Failed to remove clipboard listener safely", t)
         }
     }
 
@@ -442,9 +461,6 @@ fun MainAppContent(
     // Keep bottom search bar in sync on web loads
     LaunchedEffect(currentUrl) {
         inputUrl = currentUrl
-        if (currentTab != AppTab.BROWSER) {
-            currentTab = AppTab.BROWSER
-        }
     }
 
     // Dynamic sync of highlighted tab depending on web page location
@@ -468,212 +484,211 @@ fun MainAppContent(
         }
     }
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        bottomBar = {
-            CustomBottomNavBar(
-                selectedItem = selectedBottomItem,
-                onItemSelected = { item ->
-                    selectedBottomItem = item
-                    when (item) {
-                        BottomNavItem.MOVIES -> {
-                            currentTab = AppTab.BROWSER
-                            viewModel.loadUrl("https://www.abledrama.top/search/label/Movies")
-                        }
-                        BottomNavItem.DRAMA -> {
-                            currentTab = AppTab.BROWSER
-                            viewModel.loadUrl("https://www.abledrama.top/search/label/Drama")
-                        }
-                        BottomNavItem.WEB_SERIES -> {
-                            currentTab = AppTab.BROWSER
-                            viewModel.loadUrl("https://www.abledrama.top/search/label/Web%20Series")
-                        }
-                        BottomNavItem.SHORT_DRAMA -> {
-                            currentTab = AppTab.BROWSER
-                            viewModel.loadUrl("https://www.abledrama.top/search/label/Short%20Drama")
-                        }
-                        BottomNavItem.ANIME -> {
-                            currentTab = AppTab.BROWSER
-                            viewModel.loadUrl("https://www.abledrama.top/search/label/Anime")
-                        }
-                        BottomNavItem.ACCOUNT -> {
-                            currentTab = AppTab.ACCOUNT
-                        }
-                    }
-                }
-            )
-        }
-    ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .padding(paddingValues)
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                // Progressive load line
-                if (isLoading && currentTab == AppTab.BROWSER) {
-                    LinearProgressIndicator(
-                        progress = { loadProgress / 100f },
-                        modifier = Modifier.fillMaxWidth().height(4.dp).testTag("web_load_progress"),
-                        color = CinemaRed,
-                        trackColor = Color.Transparent
-                    )
-                }
-
-                // If internet goes offline, show interactive toast alert
-                if (!isOnline) {
-                    OfflineAlertBanner()
-                }
-
-                // Tab Content Render
-                Box(modifier = Modifier.weight(1f)) {
-                    // Always keep AdvancedWebView in composition to preserve state & receive commands instantly
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .graphicsLayer {
-                                alpha = if (currentTab == AppTab.BROWSER) 1f else 0f
-                                translationX = if (currentTab == AppTab.BROWSER) 0f else 20000f
-                            }
-                    ) {
-                        AdvancedWebView(
-                            viewModel = viewModel,
-                            isVisible = currentTab == AppTab.BROWSER,
-                            onShowCustomView = onShowCustomView,
-                            onHideCustomView = onHideCustomView,
-                            modifier = Modifier.fillMaxSize().testTag("movie_web_view"),
-                            onSingleTap = {
-                                if (isCurrentUrlAPost) {
-                                    isBookmarkOverlayVisible = !isBookmarkOverlayVisible
-                                    if (isBookmarkOverlayVisible) {
-                                        bookmarkTimerTrigger++
-                                    }
-                                }
-                            },
-                            onDownloadRequested = { url, contentDisposition, mimeType, contentLength ->
-                                downloadPendingUrl = url
-                                showDownloadFileDialog = true
-                            }
-                        )
-
-                        // Floating Bookmark Icon on the right vertical edge overlay
-                        androidx.compose.animation.AnimatedVisibility(
-                            visible = isBookmarkOverlayVisible && isCurrentUrlAPost,
-                            enter = fadeIn() + scaleIn(),
-                            exit = fadeOut() + scaleOut(),
-                            modifier = Modifier
-                                .align(Alignment.CenterEnd)
-                                .padding(end = 16.dp)
-                        ) {
-                            Card(
-                                modifier = Modifier
-                                    .size(52.dp)
-                                    .clickable {
-                                        if (isBookmarked) {
-                                            viewModel.removeBookmark(currentUrl)
-                                        } else {
-                                            viewModel.addCustomBookmark(currentUrl, currentTitle)
-                                        }
-                                        bookmarkTimerTrigger++ // reset timer so user sees transition clearly
-                                    }
-                                    .testTag("floating_post_bookmark_btn"),
-                                shape = CircleShape,
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
-                                ),
-                                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                                border = BorderStroke(
-                                    width = 1.dp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
-                                )
-                            ) {
-                                Box(
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.Bookmark,
-                                        contentDescription = "Bookmark",
-                                        tint = if (isBookmarked) Color(0xFFE50914) else MaterialTheme.colorScheme.onSurface,
-                                        modifier = Modifier.size(26.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    if (currentTab == AppTab.ACCOUNT) {
-                        MyAccountTab(
-                            bookmarks = bookmarks,
-                            history = history,
-                            isDarkTheme = isDarkTheme,
-                            onToggleDarkTheme = onToggleDarkTheme,
-                            onSectionClick = { targetUrl ->
-                                viewModel.loadUrl(targetUrl)
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            bottomBar = {
+                CustomBottomNavBar(
+                    selectedItem = selectedBottomItem,
+                    onItemSelected = { item ->
+                        selectedBottomItem = item
+                        when (item) {
+                            BottomNavItem.MOVIES -> {
                                 currentTab = AppTab.BROWSER
-                            },
-                            onDeleteBookmark = { url -> viewModel.removeBookmark(url) },
-                            onDeleteHistory = { id -> viewModel.deleteHistoryItem(id) },
-                            onClearHistory = { viewModel.clearHistory() },
-                            onEmailFeedback = {
-                                val intent = Intent(Intent.ACTION_SENDTO).apply {
-                                    data = Uri.parse("mailto:mondalsujoy1147@gmail.com")
-                                    putExtra(Intent.EXTRA_SUBJECT, "Able Drama Android VIP Feedback")
-                                }
-                                try {
-                                    context.startActivity(intent)
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "Email application not found on this device.", Toast.LENGTH_SHORT).show()
-                                }
-                            },
-                            onDownloadClick = {
-                                showDownloadManagerDialog = true
+                                viewModel.loadUrl("https://www.abledrama.top/search/label/Movies")
                             }
+                            BottomNavItem.DRAMA -> {
+                                currentTab = AppTab.BROWSER
+                                viewModel.loadUrl("https://www.abledrama.top/search/label/Drama")
+                            }
+                            BottomNavItem.WEB_SERIES -> {
+                                currentTab = AppTab.BROWSER
+                                viewModel.loadUrl("https://www.abledrama.top/search/label/Web%20Series")
+                            }
+                            BottomNavItem.SHORT_DRAMA -> {
+                                currentTab = AppTab.BROWSER
+                                viewModel.loadUrl("https://www.abledrama.top/search/label/Short%20Drama")
+                            }
+                            BottomNavItem.ANIME -> {
+                                currentTab = AppTab.BROWSER
+                                viewModel.loadUrl("https://www.abledrama.top/search/label/Anime")
+                            }
+                            BottomNavItem.ACCOUNT -> {
+                                currentTab = AppTab.ACCOUNT
+                            }
+                        }
+                    }
+                )
+            }
+        ) { paddingValues ->
+            Box(
+                modifier = Modifier
+                    .padding(paddingValues)
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+            ) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // Progressive load line
+                    if (isLoading && currentTab == AppTab.BROWSER) {
+                        LinearProgressIndicator(
+                            progress = { loadProgress / 100f },
+                            modifier = Modifier.fillMaxWidth().height(4.dp).testTag("web_load_progress"),
+                            color = CinemaRed,
+                            trackColor = Color.Transparent
                         )
+                    }
+
+                    // If internet goes offline, show interactive toast alert
+                    if (!isOnline) {
+                        OfflineAlertBanner()
+                    }
+
+                    // Tab Content Render
+                    Box(modifier = Modifier.weight(1f)) {
+                        // Always keep AdvancedWebView in composition to preserve state & receive commands instantly
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    alpha = if (currentTab == AppTab.BROWSER) 1f else 0f
+                                    translationX = if (currentTab == AppTab.BROWSER) 0f else 20000f
+                                }
+                        ) {
+                            AdvancedWebView(
+                                viewModel = viewModel,
+                                isVisible = currentTab == AppTab.BROWSER,
+                                onShowCustomView = onShowCustomView,
+                                onHideCustomView = onHideCustomView,
+                                modifier = Modifier.fillMaxSize().testTag("movie_web_view"),
+                                onSingleTap = {
+                                    if (isCurrentUrlAPost) {
+                                        isBookmarkOverlayVisible = !isBookmarkOverlayVisible
+                                        if (isBookmarkOverlayVisible) {
+                                            bookmarkTimerTrigger++
+                                        }
+                                    }
+                                },
+                                onDownloadRequested = { url, contentDisposition, mimeType, contentLength ->
+                                    downloadPendingUrl = url
+                                    showDownloadFileDialog = true
+                                }
+                            )
+
+                            // Floating Bookmark Icon on the right vertical edge overlay
+                            androidx.compose.animation.AnimatedVisibility(
+                                visible = isBookmarkOverlayVisible && isCurrentUrlAPost,
+                                enter = fadeIn() + scaleIn(),
+                                exit = fadeOut() + scaleOut(),
+                                modifier = Modifier
+                                    .align(Alignment.CenterEnd)
+                                    .padding(end = 16.dp)
+                            ) {
+                                Card(
+                                    modifier = Modifier
+                                        .size(52.dp)
+                                        .clickable {
+                                            if (isBookmarked) {
+                                                viewModel.removeBookmark(currentUrl)
+                                            } else {
+                                                viewModel.addCustomBookmark(currentUrl, currentTitle)
+                                            }
+                                            bookmarkTimerTrigger++ // reset timer so user sees transition clearly
+                                        }
+                                        .testTag("floating_post_bookmark_btn"),
+                                    shape = CircleShape,
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
+                                    ),
+                                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                                    border = BorderStroke(
+                                        width = 1.dp,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                                    )
+                                ) {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.Bookmark,
+                                            contentDescription = "Bookmark",
+                                            tint = if (isBookmarked) Color(0xFFE50914) else MaterialTheme.colorScheme.onSurface,
+                                            modifier = Modifier.size(26.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if (currentTab == AppTab.ACCOUNT) {
+                            MyAccountTab(
+                                bookmarks = bookmarks,
+                                history = history,
+                                isDarkTheme = isDarkTheme,
+                                onToggleDarkTheme = onToggleDarkTheme,
+                                onSectionClick = { targetUrl ->
+                                    viewModel.loadUrl(targetUrl)
+                                    currentTab = AppTab.BROWSER
+                                },
+                                onDeleteBookmark = { url -> viewModel.removeBookmark(url) },
+                                onDeleteHistory = { id -> viewModel.deleteHistoryItem(id) },
+                                onClearHistory = { viewModel.clearHistory() },
+                                onEmailFeedback = {
+                                    val intent = Intent(Intent.ACTION_SENDTO).apply {
+                                        data = Uri.parse("mailto:mondalsujoy1147@gmail.com")
+                                        putExtra(Intent.EXTRA_SUBJECT, "Able Drama Android VIP Feedback")
+                                    }
+                                    try {
+                                        context.startActivity(intent)
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Email application not found on this device.", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                onDownloadClick = {
+                                    showDownloadManagerDialog = true
+                                }
+                            )
+                        }
                     }
                 }
             }
         }
-    }
 
-    // Custom Downloader Dialogs
-    if (showDownloadFileDialog) {
-        DownloadFileDialog(
-            initialUrl = downloadPendingUrl,
-            onDismissRequest = { showDownloadFileDialog = false },
-            downloadRepository = downloadRepository,
-            coroutineScope = coroutineScope
-        )
-    }
+        // Custom Downloader Dialogs
+        if (showDownloadFileDialog) {
+            DownloadFileDialog(
+                initialUrl = downloadPendingUrl,
+                onDismissRequest = { showDownloadFileDialog = false },
+                downloadRepository = downloadRepository,
+                coroutineScope = coroutineScope
+            )
+        }
 
-    if (showDownloadManagerDialog) {
-        DownloadManagerDialog(
-            onDismissRequest = { showDownloadManagerDialog = false },
-            downloadRepository = downloadRepository,
-            coroutineScope = coroutineScope
-        )
-    }
+        if (showDownloadManagerDialog) {
+            DownloadManagerDialog(
+                onDismissRequest = { showDownloadManagerDialog = false },
+                downloadRepository = downloadRepository,
+                coroutineScope = coroutineScope
+            )
+        }
 
-    // Telegram Community Join Promo Dialog
-    if (showTelegramDialog) {
-        Dialog(
-            onDismissRequest = { showTelegramDialog = false },
-            properties = DialogProperties(usePlatformDefaultWidth = false)
-        ) {
+        // Telegram Community Join Promo Dialog (Inline overlay to bypass GPU sub-window driver issues and guarantee 100% crash-free responsive execution)
+        if (showTelegramDialog) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .padding(24.dp),
+                    .background(Color.Black.copy(alpha = 0.7f))
+                    .clickable(enabled = true, onClick = { showTelegramDialog = false }),
                 contentAlignment = Alignment.Center
             ) {
                 Card(
                     modifier = Modifier
                         .widthIn(max = 420.dp)
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(24.dp))
+                        .padding(24.dp)
+                        .clickable(enabled = true, onClick = { /* Prevent clicks propagating to parent dismiss */ })
                         .testTag("telegram_promo_dialog"),
+                    shape = RoundedCornerShape(24.dp),
                     colors = CardDefaults.cardColors(containerColor = DarkVacuum),
                     border = BorderStroke(1.2.dp, CinemaRed.copy(alpha = 0.5f))
                 ) {
@@ -719,7 +734,7 @@ fun MainAppContent(
                             lineHeight = 18.sp
                         )
 
-                        Spacer(modifier = Modifier.height(14.dp))
+                        Spacer(modifier = Modifier.height(16.dp))
 
                         Text(
                             text = "Auto-closing in ${telegramCountdown}s...",
@@ -728,15 +743,18 @@ fun MainAppContent(
                             fontWeight = FontWeight.Bold
                         )
 
-                        Spacer(modifier = Modifier.height(20.dp))
+                        Spacer(modifier = Modifier.height(24.dp))
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            TextButton(onClick = { showTelegramDialog = false }) {
-                                Text("Dismiss", color = Color.Gray, fontWeight = FontWeight.SemiBold)
+                            TextButton(
+                                onClick = { showTelegramDialog = false },
+                                colors = ButtonDefaults.textButtonColors(contentColor = Color.LightGray)
+                            ) {
+                                Text("Dismiss", fontWeight = FontWeight.SemiBold)
                             }
 
                             Button(
@@ -1617,29 +1635,12 @@ fun MyAccountTab(
                     Spacer(modifier = Modifier.width(16.dp))
                     
                     Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "Download Manager",
-                                color = MaterialTheme.colorScheme.onSurface,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            // Badge with 1DM text
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(CinemaGold.copy(alpha = 0.2f))
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = "1DM",
-                                    color = CinemaGold,
-                                    fontSize = 8.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
+                        Text(
+                            text = "Download Manager",
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
 
                     Icon(

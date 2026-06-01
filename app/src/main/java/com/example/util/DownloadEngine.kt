@@ -17,15 +17,16 @@ object DownloadEngine {
     private const val TAG = "DownloadEngine"
     private val activeJobs = ConcurrentHashMap<Long, Job>()
     private var repository: DownloadRepository? = null
+    private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun init(repo: DownloadRepository) {
         repository = repo
     }
 
-    fun startDownload(context: Context, itemId: Long, scope: CoroutineScope) {
+    fun startDownload(context: Context, itemId: Long, scope: CoroutineScope? = null) {
         if (activeJobs.containsKey(itemId)) return // already running
 
-        val job = scope.launch(Dispatchers.IO) {
+        val job = engineScope.launch(Dispatchers.IO) {
             val repo = repository ?: return@launch
             var item = repo.getDownloadById(itemId) ?: return@launch
 

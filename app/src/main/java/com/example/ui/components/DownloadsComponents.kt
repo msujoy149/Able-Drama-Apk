@@ -111,24 +111,34 @@ fun DownloadFileDialog(
 
     // Default Storage options - Safely save to the phone's public download directory under "Able Drama"
     val defaultDir = remember(context) {
-        val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val sub = File(rootDownloadDir, "Able Drama")
         try {
+            val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            val sub = File(rootDownloadDir, "Able Drama")
             if (!sub.exists()) {
                 sub.mkdirs()
             }
+            if (sub.exists() && sub.canWrite()) {
+                sub
+            } else {
+                // Fallback to application standard external downloads directory
+                val base = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+                val fallbackSub = File(base, "Able Drama")
+                if (!fallbackSub.exists()) {
+                    fallbackSub.mkdirs()
+                }
+                fallbackSub
+            }
         } catch (e: Exception) {
             e.printStackTrace()
-        }
-        
-        if (sub.exists()) {
-            sub
-        } else {
-            // Fallback to application standard external downloads directory
+            // Ultimate safe fallback
             val base = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
             val fallbackSub = File(base, "Able Drama")
-            if (!fallbackSub.exists()) {
-                fallbackSub.mkdirs()
+            try {
+                if (!fallbackSub.exists()) {
+                    fallbackSub.mkdirs()
+                }
+            } catch (ex: Exception) {
+                ex.printStackTrace()
             }
             fallbackSub
         }
