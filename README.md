@@ -1,12 +1,20 @@
 <div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
+<img width="1200" height="475" alt="GHBanner" src="https://i.postimg.cc/sDC39G08/Able-Drama-Logo-New.png" />
 </div>
 
-# Run and deploy your AI Studio app
+# 🎬 AbleDrama
+AbleDrama is a modern entertainment platform designed for movie and drama enthusiasts. Discover trending titles, explore a wide collection of content, and enjoy a fast, clean, and user-friendly experience.
 
-This contains everything you need to run your app locally.
+## ✨ Features
+* 🎥 Movies & Drama Collection
+* 🔍 Fast Search & Discovery
+* 📱 Responsive Design
+* ⚡ Smooth Performance
+* 🌙 Modern User Interface
+* 🚀 Optimized User Experience
 
-View your app in AI Studio: https://ai.studio/apps/b166a9a9-9eb7-42f6-9489-3605226efa86
+Built to make entertainment simple, accessible, and enjoyable.
+
 
 ## Run Locally
 
