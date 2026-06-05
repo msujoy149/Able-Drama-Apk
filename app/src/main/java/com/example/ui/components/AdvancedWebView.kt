@@ -44,6 +44,7 @@ import kotlinx.coroutines.flow.collectLatest
 @Composable
 fun AdvancedWebView(
     viewModel: BrowserViewModel,
+    tabId: String,
     isVisible: Boolean = true,
     modifier: Modifier = Modifier,
     onShowCustomView: (android.view.View, WebChromeClient.CustomViewCallback) -> Unit = { _, _ -> },
@@ -155,26 +156,50 @@ fun AdvancedWebView(
 
         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
             super.onPageStarted(view, url, favicon)
-            viewModel.updateLoadingStatus(true, 10)
+            viewModel.updateLoadingStatus(tabId, true, 10)
+            viewModel.updateWebThemeColor(tabId, null)
         }
 
         override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
             super.doUpdateVisitedHistory(view, url, isReload)
             if (url != null) {
-                viewModel.updateCurrentState(url, view?.title ?: "")
+                viewModel.updateCurrentState(tabId, url, view?.title ?: "")
             }
         }
 
         override fun onPageFinished(view: WebView?, url: String?) {
             super.onPageFinished(view, url)
-            viewModel.updateLoadingStatus(false, 100)
+            viewModel.updateLoadingStatus(tabId, false, 100)
             if (url != null) {
-                viewModel.updateCurrentState(url, view?.title ?: "")
+                viewModel.updateCurrentState(tabId, url, view?.title ?: "")
             }
             viewModel.updateNavigationCapabilities(
+                tabId,
                 back = view?.canGoBack() ?: false,
                 forward = view?.canGoForward() ?: false
             )
+            view?.evaluateJavascript(
+                "(function() {\n" +
+                "  var metaTheme = document.querySelector('meta[name=\"theme-color\"]');\n" +
+                "  if (metaTheme && metaTheme.content) return metaTheme.content;\n" +
+                "  var metaTile = document.querySelector('meta[name=\"msapplication-TileColor\"]');\n" +
+                "  if (metaTile && metaTile.content) return metaTile.content;\n" +
+                "  return null;\n" +
+                "})()",
+                { result ->
+                    val cleanResult = result?.trim()?.replace("\"", "")
+                    if (cleanResult != null && cleanResult != "null" && cleanResult.isNotBlank()) {
+                        viewModel.updateWebThemeColor(tabId, cleanResult)
+                    } else {
+                        viewModel.updateWebThemeColor(tabId, null)
+                    }
+                }
+            )
+            if (view != null) {
+                Handler(Looper.getMainLooper()).postDelayed({
+                    captureWebViewThumbnail(view, tabId, viewModel)
+                }, 800)
+            }
         }
 
         override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
@@ -207,12 +232,12 @@ fun AdvancedWebView(
     webView.webChromeClient = object : WebChromeClient() {
         override fun onProgressChanged(view: WebView?, newProgress: Int) {
             super.onProgressChanged(view, newProgress)
-            viewModel.updateLoadingStatus(newProgress < 100, newProgress)
+            viewModel.updateLoadingStatus(tabId, newProgress < 100, newProgress)
         }
 
         override fun onReceivedTitle(view: WebView?, title: String?) {
             super.onReceivedTitle(view, title)
-            viewModel.updateCurrentState(view?.url ?: "", title ?: "Able Drama")
+            viewModel.updateCurrentState(tabId, view?.url ?: "", title ?: "Able Drama")
         }
 
         // Full Screen video support
@@ -227,35 +252,58 @@ fun AdvancedWebView(
         }
     }
 
-    // Collect external commands from ViewModel
-    LaunchedEffect(viewModel, webView) {
+    // Collect external commands from ViewModel filtered for this tabId
+    LaunchedEffect(viewModel, webView, tabId) {
         viewModel.commands.collectLatest { command ->
-            try {
-                when (command) {
-                    is WebViewCommand.GoBack -> if (webView.canGoBack()) webView.goBack()
-                    is WebViewCommand.GoForward -> if (webView.canGoForward()) webView.goForward()
-                    is WebViewCommand.Reload -> webView.reload()
-                    is WebViewCommand.LoadUrl -> webView.loadUrl(command.url)
+            if (command.tabId == tabId) {
+                try {
+                    when (command) {
+                        is WebViewCommand.GoBack -> if (webView.canGoBack()) webView.goBack()
+                        is WebViewCommand.GoForward -> if (webView.canGoForward()) webView.goForward()
+                        is WebViewCommand.Reload -> webView.reload()
+                        is WebViewCommand.LoadUrl -> webView.loadUrl(command.url)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
             }
         }
     }
 
     // Synchronize starting URL once on initialization and on recreate
+    val startingUrl = remember { viewModel.tabs.value.find { it.id == tabId }?.url ?: "https://www.abledrama.top" }
     LaunchedEffect(webView) {
         try {
-            webView.loadUrl(viewModel.currentUrl.value)
+            webView.loadUrl(startingUrl)
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    // Intercept system Back button to navigate parent web stack
-    val canGoBack by viewModel.canGoBack.collectAsState()
-    BackHandler(enabled = canGoBack && isVisible) {
+    // Intercept system Back button to navigate parent web stack if this tab is active
+    val selectedTabIdVal by viewModel.selectedTabId.collectAsState()
+    val tabsListVal by viewModel.tabs.collectAsState()
+
+    val isSelectedTab = remember(selectedTabIdVal, tabId) {
+        selectedTabIdVal == tabId
+    }
+
+    val canGoBack = remember(tabsListVal, tabId) {
+        tabsListVal.find { it.id == tabId }?.canGoBack ?: false
+    }
+
+    BackHandler(enabled = canGoBack && isVisible && isSelectedTab) {
         viewModel.goBack()
+    }
+
+    LaunchedEffect(webView, isVisible) {
+        if (isVisible) {
+            kotlinx.coroutines.delay(2000)
+            while (true) {
+                captureWebViewThumbnail(webView, tabId, viewModel)
+                kotlinx.coroutines.delay(4000)
+            }
+        }
     }
 
     // Embed WebView into Jetpack Compose layout tree with key-controlled recreation
@@ -267,5 +315,34 @@ fun AdvancedWebView(
                 view.visibility = if (isVisible) android.view.View.VISIBLE else android.view.View.GONE
             }
         )
+    }
+}
+
+private fun captureWebViewThumbnail(webView: WebView, tabId: String, viewModel: BrowserViewModel) {
+    webView.post {
+        try {
+            val width = webView.width
+            val height = webView.height
+            if (width > 0 && height > 0) {
+                val originalBitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+                val canvas = android.graphics.Canvas(originalBitmap)
+                webView.draw(canvas)
+                
+                val maxDim = 320
+                val scale = maxDim.toFloat() / Math.max(width, height).toFloat()
+                val finalBitmap = if (scale < 1.0f) {
+                    val sw = (width * scale).toInt()
+                    val sh = (height * scale).toInt()
+                    val scaled = android.graphics.Bitmap.createScaledBitmap(originalBitmap, sw, sh, true)
+                    originalBitmap.recycle()
+                    scaled
+                } else {
+                    originalBitmap
+                }
+                viewModel.updateTabScreenshot(tabId, finalBitmap)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 }

@@ -9,12 +9,26 @@ import com.example.data.BrowserRepository
 import com.example.data.HistoryItem
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import java.util.UUID
+
+data class BrowserTab(
+    val id: String,
+    val url: String,
+    val title: String = "Google",
+    val canGoBack: Boolean = false,
+    val canGoForward: Boolean = false,
+    val webThemeColor: String? = null,
+    val progress: Int = 0,
+    val isLoading: Boolean = false,
+    val screenshot: android.graphics.Bitmap? = null
+)
 
 sealed interface WebViewCommand {
-    data object GoBack : WebViewCommand
-    data object GoForward : WebViewCommand
-    data object Reload : WebViewCommand
-    data class LoadUrl(val url: String) : WebViewCommand
+    val tabId: String
+    data class GoBack(override val tabId: String) : WebViewCommand
+    data class GoForward(override val tabId: String) : WebViewCommand
+    data class Reload(override val tabId: String) : WebViewCommand
+    data class LoadUrl(override val tabId: String, val url: String) : WebViewCommand
 }
 
 class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() {
@@ -24,33 +38,58 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
         const val SECONDARY_URL = "https://www.abledrama.top"
     }
 
+    // List of open tabs
+    private val _tabs = MutableStateFlow<List<BrowserTab>>(
+        listOf(BrowserTab(id = "tab_initial", url = SECONDARY_URL, title = "Able Drama"))
+    )
+    val tabs: StateFlow<List<BrowserTab>> = _tabs.asStateFlow()
+
+    private val _selectedTabId = MutableStateFlow("tab_initial")
+    val selectedTabId: StateFlow<String> = _selectedTabId.asStateFlow()
+
+    // Derived states of the selected tab for backward compatibility
+    val currentUrl: StateFlow<String> = combine(_tabs, _selectedTabId) { tabsList, activeId ->
+        tabsList.find { it.id == activeId }?.url ?: SECONDARY_URL
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SECONDARY_URL)
+
+    val currentTitle: StateFlow<String> = combine(_tabs, _selectedTabId) { tabsList, activeId ->
+        tabsList.find { it.id == activeId }?.title ?: "Able Drama"
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "Able Drama")
+
+    val isLoading: StateFlow<Boolean> = combine(_tabs, _selectedTabId) { tabsList, activeId ->
+        tabsList.find { it.id == activeId }?.isLoading ?: false
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val progress: StateFlow<Int> = combine(_tabs, _selectedTabId) { tabsList, activeId ->
+        tabsList.find { it.id == activeId }?.progress ?: 0
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val canGoBack: StateFlow<Boolean> = combine(_tabs, _selectedTabId) { tabsList, activeId ->
+        tabsList.find { it.id == activeId }?.canGoBack ?: false
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val canGoForward: StateFlow<Boolean> = combine(_tabs, _selectedTabId) { tabsList, activeId ->
+        tabsList.find { it.id == activeId }?.canGoForward ?: false
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val webThemeColor: StateFlow<String?> = combine(_tabs, _selectedTabId) { tabsList, activeId ->
+        tabsList.find { it.id == activeId }?.webThemeColor
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
     // Default configuration URL
     private val _homeUrl = MutableStateFlow(SECONDARY_URL)
     val homeUrl: StateFlow<String> = _homeUrl.asStateFlow()
 
-    // Current page status
-    private val _currentUrl = MutableStateFlow(SECONDARY_URL)
-    val currentUrl: StateFlow<String> = _currentUrl.asStateFlow()
-
-    private val _currentTitle = MutableStateFlow("Able Drama")
-    val currentTitle: StateFlow<String> = _currentTitle.asStateFlow()
-
-    private val _isLoading = MutableStateFlow(false)
-    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
-
-    private val _progress = MutableStateFlow(0)
-    val progress: StateFlow<Int> = _progress.asStateFlow()
-
-    // Web view state signals
-    private val _canGoBack = MutableStateFlow(false)
-    val canGoBack: StateFlow<Boolean> = _canGoBack.asStateFlow()
-
-    private val _canGoForward = MutableStateFlow(false)
-    val canGoForward: StateFlow<Boolean> = _canGoForward.asStateFlow()
-
     // Commands to send to the WebView Composable
     private val _commands = MutableSharedFlow<WebViewCommand>(extraBufferCapacity = 16)
     val commands: SharedFlow<WebViewCommand> = _commands.asSharedFlow()
+
+    private val _openBrowserTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val openBrowserTrigger = _openBrowserTrigger.asSharedFlow()
+
+    fun triggerOpenBrowser() {
+        _openBrowserTrigger.tryEmit(Unit)
+    }
 
     // Local Persistence Streams
     val bookmarks: StateFlow<List<Bookmark>> = repository.bookmarks
@@ -59,15 +98,19 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
     val history: StateFlow<List<HistoryItem>> = repository.history
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Check if current URL is bookmarked
-    val isCurrentUrlBookmarked: StateFlow<Boolean> = _currentUrl
-        .flatMapLatest { url -> repository.isBookmarkedFlow(url) }
+    val browserBookmarks: StateFlow<List<Bookmark>> = repository.browserBookmarks
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val browserHistory: StateFlow<List<HistoryItem>> = repository.browserHistory
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Check if current URL is bookmarked as a browser bookmark
+    val isCurrentUrlBookmarked: StateFlow<Boolean> = currentUrl
+        .flatMapLatest { url -> repository.isBookmarkedFlow(url, isBrowser = true) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     init {
-        // Default to a default page on start
         _homeUrl.value = SECONDARY_URL
-        _currentUrl.value = SECONDARY_URL
     }
 
     fun setHomeUrl(url: String) {
@@ -75,71 +118,174 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
         _homeUrl.value = formattedUrl
     }
 
-    fun updateCurrentState(url: String, title: String) {
-        _currentUrl.value = url
-        if (title.isNotBlank() && !title.startsWith("http")) {
-            _currentTitle.value = title
+    // Multi-tab actions
+    fun createNewTab(url: String = "https://www.abledrama.top") {
+        val newId = UUID.randomUUID().toString()
+        val formattedUrl = formatUrl(url)
+        val newTab = BrowserTab(id = newId, url = formattedUrl, title = "Able Drama")
+        _tabs.value = _tabs.value + newTab
+        _selectedTabId.value = newId
+    }
+
+    fun selectTab(tabId: String) {
+        if (_tabs.value.any { it.id == tabId }) {
+            _selectedTabId.value = tabId
         }
-        // Add to history automatically in background
-        viewModelScope.launch {
-            repository.addHistory(url, title.ifBlank { url })
+    }
+
+    fun closeTab(tabId: String) {
+        val currentList = _tabs.value
+        if (currentList.size <= 1) {
+            val newId = UUID.randomUUID().toString()
+            _tabs.value = listOf(BrowserTab(id = newId, url = "https://www.abledrama.top", title = "Able Drama"))
+            _selectedTabId.value = newId
+            return
+        }
+
+        val remainingTabs = currentList.filter { it.id != tabId }
+        _tabs.value = remainingTabs
+
+        if (_selectedTabId.value == tabId) {
+            _selectedTabId.value = remainingTabs.last().id
+        }
+    }
+
+    fun updateCurrentState(url: String, title: String) {
+        updateCurrentState(_selectedTabId.value, url, title)
+    }
+
+    fun updateCurrentState(tabId: String, url: String, title: String) {
+        _tabs.value = _tabs.value.map { tab ->
+            if (tab.id == tabId) {
+                val cleanTitle = if (title.isNotBlank() && !title.startsWith("http")) title else tab.title
+                tab.copy(url = url, title = cleanTitle)
+            } else {
+                tab
+            }
+        }
+        if (_selectedTabId.value == tabId && url.isNotBlank()) {
+            viewModelScope.launch {
+                repository.addHistory(url, title.ifBlank { url }, isBrowser = true)
+            }
         }
     }
 
     fun updateLoadingStatus(loading: Boolean, progressPercent: Int) {
-        _isLoading.value = loading
-        _progress.value = progressPercent
+        updateLoadingStatus(_selectedTabId.value, loading, progressPercent)
+    }
+
+    fun updateLoadingStatus(tabId: String, loading: Boolean, progressPercent: Int) {
+        _tabs.value = _tabs.value.map { tab ->
+            if (tab.id == tabId) {
+                tab.copy(isLoading = loading, progress = progressPercent)
+            } else {
+                tab
+            }
+        }
+    }
+
+    fun updateWebThemeColor(color: String?) {
+        updateWebThemeColor(_selectedTabId.value, color)
+    }
+
+    fun updateWebThemeColor(tabId: String, color: String?) {
+        _tabs.value = _tabs.value.map { tab ->
+            if (tab.id == tabId) {
+                tab.copy(webThemeColor = color)
+            } else {
+                tab
+            }
+        }
     }
 
     fun updateNavigationCapabilities(back: Boolean, forward: Boolean) {
-        _canGoBack.value = back
-        _canGoForward.value = forward
+        updateNavigationCapabilities(_selectedTabId.value, back, forward)
+    }
+
+    fun updateNavigationCapabilities(tabId: String, back: Boolean, forward: Boolean) {
+        _tabs.value = _tabs.value.map { tab ->
+            if (tab.id == tabId) {
+                tab.copy(canGoBack = back, canGoForward = forward)
+            } else {
+                tab
+            }
+        }
+    }
+
+    fun updateTabScreenshot(tabId: String, bitmap: android.graphics.Bitmap?) {
+        _tabs.value = _tabs.value.map { tab ->
+            if (tab.id == tabId) {
+                tab.copy(screenshot = bitmap)
+            } else {
+                tab
+            }
+        }
     }
 
     // UI actions
     fun loadUrl(url: String) {
         val formattedUrl = formatUrl(url)
-        _currentUrl.value = formattedUrl
-        _commands.tryEmit(WebViewCommand.LoadUrl(formattedUrl))
+        val activeId = _selectedTabId.value
+        _tabs.value = _tabs.value.map { tab ->
+            if (tab.id == activeId) {
+                tab.copy(url = formattedUrl)
+            } else {
+                tab
+            }
+        }
+        _commands.tryEmit(WebViewCommand.LoadUrl(activeId, formattedUrl))
     }
 
     fun goHome() {
-        _commands.tryEmit(WebViewCommand.LoadUrl(_homeUrl.value))
+        val activeId = _selectedTabId.value
+        _commands.tryEmit(WebViewCommand.LoadUrl(activeId, "https://www.abledrama.top"))
     }
 
     fun goBack() {
-        _commands.tryEmit(WebViewCommand.GoBack)
+        _commands.tryEmit(WebViewCommand.GoBack(_selectedTabId.value))
     }
 
     fun goForward() {
-        _commands.tryEmit(WebViewCommand.GoForward)
+        _commands.tryEmit(WebViewCommand.GoForward(_selectedTabId.value))
     }
 
     fun reload() {
-        _commands.tryEmit(WebViewCommand.Reload)
+        _commands.tryEmit(WebViewCommand.Reload(_selectedTabId.value))
     }
 
     fun toggleBookmark() {
-        val url = _currentUrl.value
-        val title = _currentTitle.value
+        val url = currentUrl.value
+        val title = currentTitle.value
         viewModelScope.launch {
-            if (repository.isBookmarked(url)) {
-                repository.removeBookmark(url)
+            if (repository.isBookmarked(url, isBrowser = true)) {
+                repository.removeBookmark(url, isBrowser = true)
             } else {
-                repository.addBookmark(url, title)
+                repository.addBookmark(url, title, isBrowser = true)
             }
         }
     }
 
     fun addCustomBookmark(url: String, title: String) {
         viewModelScope.launch {
-            repository.addBookmark(formatUrl(url), title)
+            repository.addBookmark(formatUrl(url), title, isBrowser = false)
         }
     }
 
     fun removeBookmark(url: String) {
         viewModelScope.launch {
-            repository.removeBookmark(url)
+            repository.removeBookmark(url, isBrowser = false)
+        }
+    }
+
+    fun addBrowserBookmark(url: String, title: String) {
+        viewModelScope.launch {
+            repository.addBookmark(formatUrl(url), title, isBrowser = true)
+        }
+    }
+
+    fun removeBrowserBookmark(url: String) {
+        viewModelScope.launch {
+            repository.removeBookmark(url, isBrowser = true)
         }
     }
 
@@ -151,7 +297,13 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
 
     fun clearHistory() {
         viewModelScope.launch {
-            repository.clearAllHistory()
+            repository.clearAllHistory(isBrowser = false)
+        }
+    }
+
+    fun clearBrowserHistory() {
+        viewModelScope.launch {
+            repository.clearAllHistory(isBrowser = true)
         }
     }
 
