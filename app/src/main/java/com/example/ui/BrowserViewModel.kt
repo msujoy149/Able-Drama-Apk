@@ -111,9 +111,27 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
     val browserHistory: StateFlow<List<HistoryItem>> = repository.browserHistory
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    private val _optimisticCustomBookmarks = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    private val _optimisticBrowserBookmarks = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+
     // Check if current URL is bookmarked as a browser bookmark
     val isCurrentUrlBookmarked: StateFlow<Boolean> = currentUrl
-        .flatMapLatest { url -> repository.isBookmarkedFlow(url, isBrowser = true) }
+        .flatMapLatest { url ->
+            val formattedUrl = formatUrl(url)
+            repository.isBookmarkedFlow(formattedUrl, isBrowser = true).combine(_optimisticBrowserBookmarks) { dbVal, optMap ->
+                optMap[formattedUrl] ?: dbVal
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    // Check if current URL is bookmarked as a custom/post bookmark
+    val isCurrentUrlCustomBookmarked: StateFlow<Boolean> = currentUrl
+        .flatMapLatest { url ->
+            val formattedUrl = formatUrl(url)
+            repository.isBookmarkedFlow(formattedUrl, isBrowser = false).combine(_optimisticCustomBookmarks) { dbVal, optMap ->
+                optMap[formattedUrl] ?: dbVal
+            }
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     init {
@@ -263,36 +281,47 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
     fun toggleBookmark() {
         val url = currentUrl.value
         val title = currentTitle.value
+        val formattedUrl = formatUrl(url)
+        val currentlyBookmarked = isCurrentUrlBookmarked.value
+        _optimisticBrowserBookmarks.value = _optimisticBrowserBookmarks.value + (formattedUrl to !currentlyBookmarked)
         viewModelScope.launch {
-            if (repository.isBookmarked(url, isBrowser = true)) {
-                repository.removeBookmark(url, isBrowser = true)
+            if (currentlyBookmarked) {
+                repository.removeBookmark(formattedUrl, isBrowser = true)
             } else {
-                repository.addBookmark(url, title, isBrowser = true)
+                repository.addBookmark(formattedUrl, title, isBrowser = true)
             }
         }
     }
 
     fun addCustomBookmark(url: String, title: String) {
+        val formattedUrl = formatUrl(url)
+        _optimisticCustomBookmarks.value = _optimisticCustomBookmarks.value + (formattedUrl to true)
         viewModelScope.launch {
-            repository.addBookmark(formatUrl(url), title, isBrowser = false)
+            repository.addBookmark(formattedUrl, title, isBrowser = false)
         }
     }
 
     fun removeBookmark(url: String) {
+        val formattedUrl = formatUrl(url)
+        _optimisticCustomBookmarks.value = _optimisticCustomBookmarks.value + (formattedUrl to false)
         viewModelScope.launch {
-            repository.removeBookmark(url, isBrowser = false)
+            repository.removeBookmark(formattedUrl, isBrowser = false)
         }
     }
 
     fun addBrowserBookmark(url: String, title: String) {
+        val formattedUrl = formatUrl(url)
+        _optimisticBrowserBookmarks.value = _optimisticBrowserBookmarks.value + (formattedUrl to true)
         viewModelScope.launch {
-            repository.addBookmark(formatUrl(url), title, isBrowser = true)
+            repository.addBookmark(formattedUrl, title, isBrowser = true)
         }
     }
 
     fun removeBrowserBookmark(url: String) {
+        val formattedUrl = formatUrl(url)
+        _optimisticBrowserBookmarks.value = _optimisticBrowserBookmarks.value + (formattedUrl to false)
         viewModelScope.launch {
-            repository.removeBookmark(url, isBrowser = true)
+            repository.removeBookmark(formattedUrl, isBrowser = true)
         }
     }
 

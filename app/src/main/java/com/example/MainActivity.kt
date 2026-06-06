@@ -48,6 +48,10 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
@@ -65,6 +69,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.room.Room
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.window.Dialog
@@ -119,22 +127,24 @@ class MainActivity : ComponentActivity() {
     private fun checkClipboardAndRedirect() {
         if (!isActivityResumed || !hasWindowFocus()) return
         if (!isAbleDramaActive) return
-        try {
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
-            
-            val hasClip = try {
-                clipboard.hasPrimaryClip()
-            } catch (t: Throwable) {
-                android.util.Log.e("ClipboardSafe", "Failed to check hasPrimaryClip safely", t)
-                false
-            }
-            
-            if (hasClip) {
-                val clipData = try {
-                    clipboard.primaryClip
-                } catch (t: Throwable) {
-                    android.util.Log.e("ClipboardSafe", "Failed to get primaryClip safely", t)
-                    null
+        
+        lifecycleScope.launch(Dispatchers.Default) {
+            try {
+                val clipboard = withContext(Dispatchers.Main) {
+                    getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                } ?: return@launch
+                
+                val clipData = withContext(Dispatchers.Main) {
+                    try {
+                        if (clipboard.hasPrimaryClip()) {
+                            clipboard.primaryClip
+                        } else {
+                            null
+                        }
+                    } catch (t: Throwable) {
+                        android.util.Log.e("ClipboardSafe", "Failed to get primaryClip safely", t)
+                        null
+                    }
                 }
                 
                 if (clipData != null && clipData.itemCount > 0) {
@@ -152,13 +162,13 @@ class MainActivity : ComponentActivity() {
                                 lastProcessedClipText = urlCandidate
                                 isInitialCaptureDone = true
                                 android.util.Log.d("ClipboardRedirection", "Initial clipboard captured: $urlCandidate (No redirect)")
-                                return
+                                return@launch
                             }
                             if (urlCandidate != lastProcessedClipText) {
                                 lastProcessedClipText = urlCandidate
                                 android.util.Log.d("ClipboardRedirection", "Redirecting internally to URL: $urlCandidate")
-                                Toast.makeText(this, "Opening copied link...", Toast.LENGTH_SHORT).show()
-                                runOnUiThread {
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(this@MainActivity, "Opening copied link...", Toast.LENGTH_SHORT).show()
                                     browserViewModel?.loadUrl(urlCandidate)
                                     browserViewModel?.triggerOpenBrowser()
                                 }
@@ -169,56 +179,54 @@ class MainActivity : ComponentActivity() {
                     } else {
                         isInitialCaptureDone = true
                     }
+                } else {
+                    isInitialCaptureDone = true
                 }
-            } else {
-                isInitialCaptureDone = true
+            } catch (t: Throwable) {
+                android.util.Log.e("ClipboardSafe", "Exception in clipboard check redirection", t)
             }
-        } catch (t: Throwable) {
-            android.util.Log.e("ClipboardSafe", "Exception in clipboard check redirection", t)
         }
     }
 
     private fun extractUrl(text: String): String? {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return null
-        
-        // 1. If it starts with http:// or https:// (case insensitive)
-        if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
-            if (!trimmed.contains(" ")) {
-                return trimmed
-            } else {
-                val parts = trimmed.split("\\s+".toRegex())
-                if (parts.size == 1) {
-                    return parts[0]
+
+        // 1. Check for standard HTTP/HTTPS URLs anywhere in the text using a strict regex
+        val httpRegex = "(?i)\\bhttps?://\\S+".toRegex()
+        val matchHttp = httpRegex.find(trimmed)
+        if (matchHttp != null) {
+            val matched = matchHttp.value
+            val clean = matched.removeSuffix(".").removeSuffix(",").removeSuffix("?").removeSuffix("!").removeSuffix(")")
+            return clean
+        }
+
+        // 2. Check for www. domains anywhere in the text
+        val wwwRegex = "(?i)\\bwww\\.\\S+".toRegex()
+        val matchWww = wwwRegex.find(trimmed)
+        if (matchWww != null) {
+            val matched = matchWww.value
+            val clean = matched.removeSuffix(".").removeSuffix(",").removeSuffix("?").removeSuffix("!").removeSuffix(")")
+            return "https://$clean"
+        }
+
+        // 3. Scan each word to find plain domain names without protocol, e.g. abledrama.top, google.com
+        val words = trimmed.split("\\s+".toRegex())
+        val domainRegex = "^(?i)[a-zA-Z0-9][-a-zA-Z0-9._]*\\.[a-zA-Z]{2,6}(/\\S*)?$".toRegex()
+        val invalidExtensions = setOf("txt", "png", "jpg", "jpeg", "gif", "mp4", "mp3", "pdf", "zip", "apk", "xml", "json")
+        for (word in words) {
+            val cleanWord = word.removeSuffix(".").removeSuffix(",").removeSuffix("?").removeSuffix("!").removeSuffix(")").trim()
+            if (domainRegex.matches(cleanWord)) {
+                val suffix = cleanWord.substringBefore("/").substringAfterLast(".").lowercase()
+                if (suffix in invalidExtensions) continue
+                
+                val partBeforeDot = cleanWord.substringBefore(".")
+                if (partBeforeDot.all { it.isDigit() } && suffix.all { it.isDigit() }) {
+                    continue
                 }
-                return null // Contains spaces, classified as paragraph/description instead of a URL
+                
+                return "https://$cleanWord"
             }
-        }
-        
-        // 2. If it starts with www. (case insensitive)
-        if (trimmed.startsWith("www.", ignoreCase = true)) {
-            if (!trimmed.contains(" ")) {
-                return "https://$trimmed"
-            }
-            return null
-        }
-        
-        // 3. Check for standard domain-like pattern (e.g. abledrama.top, google.com).
-        // It must not contain spaces and must have a valid top level domain (alphabetic TLD of 2-6 chars) optionally followed by a path.
-        val domainRegex = "^[a-zA-Z0-9][-a-zA-Z0-9._]*\\.[a-zA-Z]{2,6}(/\\S*)?$".toRegex()
-        if (domainRegex.matches(trimmed) && !trimmed.contains(" ")) {
-            // Also ensure it is not a non-web file type or invalid extension
-            val suffix = trimmed.substringAfterLast(".").lowercase()
-            val invalidExtensions = setOf("txt", "png", "jpg", "jpeg", "gif", "mp4", "mp3", "pdf", "zip", "apk", "xml")
-            if (suffix in invalidExtensions) return null
-            
-            // Ensure before the dot isn't just digits (rejecting numbers/codes like "1.2" or "10.0")
-            val partBeforeDot = trimmed.substringBefore(".")
-            if (partBeforeDot.all { it.isDigit() } && suffix.all { it.isDigit() }) {
-                return null
-            }
-            
-            return "https://$trimmed"
         }
         
         return null
@@ -422,6 +430,7 @@ fun MainAppContent(
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val loadProgress by viewModel.progress.collectAsStateWithLifecycle()
     val isBookmarked by viewModel.isCurrentUrlBookmarked.collectAsStateWithLifecycle()
+    val isCustomBookmarked by viewModel.isCurrentUrlCustomBookmarked.collectAsStateWithLifecycle()
     val canGoBack by viewModel.canGoBack.collectAsStateWithLifecycle()
     val canGoForward by viewModel.canGoForward.collectAsStateWithLifecycle()
 
@@ -735,14 +744,25 @@ fun MainAppContent(
                                     .align(Alignment.CenterEnd)
                                     .padding(end = 16.dp)
                             ) {
+                                val heartScale by animateFloatAsState(
+                                    targetValue = if (isCustomBookmarked) 1.25f else 1.0f,
+                                    animationSpec = spring(
+                                        dampingRatio = Spring.DampingRatioHighBouncy,
+                                        stiffness = Spring.StiffnessMedium
+                                    ),
+                                    label = "HeartAnimation"
+                                )
+
                                 Card(
                                     modifier = Modifier
                                         .size(52.dp)
                                         .clickable {
-                                            if (isBookmarked) {
+                                            if (isCustomBookmarked) {
                                                 viewModel.removeBookmark(currentUrl)
+                                                Toast.makeText(context, "Bookmark removed", Toast.LENGTH_SHORT).show()
                                             } else {
                                                 viewModel.addCustomBookmark(currentUrl, currentTitle)
+                                                Toast.makeText(context, "Post bookmarked!", Toast.LENGTH_SHORT).show()
                                             }
                                             bookmarkTimerTrigger++ // reset timer so user sees transition clearly
                                         }
@@ -762,10 +782,12 @@ fun MainAppContent(
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Icon(
-                                            imageVector = if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.Bookmark,
+                                            imageVector = if (isCustomBookmarked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                                             contentDescription = "Bookmark",
-                                            tint = if (isBookmarked) Color(0xFFE50914) else MaterialTheme.colorScheme.onSurface,
-                                            modifier = Modifier.size(26.dp)
+                                            tint = if (isCustomBookmarked) Color(0xFFE50914) else MaterialTheme.colorScheme.onSurface,
+                                            modifier = Modifier
+                                                .size(26.dp)
+                                                .scale(heartScale)
                                         )
                                     }
                                 }
