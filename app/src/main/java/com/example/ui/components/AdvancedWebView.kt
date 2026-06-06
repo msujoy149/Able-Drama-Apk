@@ -125,9 +125,69 @@ fun AdvancedWebView(
 
     // Connect WebView controls back to view model status
     webView.webViewClient = object : WebViewClient() {
+        private fun handleGoogleSearchInterception(view: WebView?, url: String): Boolean {
+            try {
+                val uri = Uri.parse(url)
+                val host = uri.host ?: ""
+                val path = uri.path ?: ""
+                if (host.contains("google.") && path.contains("/search")) {
+                    val query = uri.getQueryParameter("q")
+                    if (!query.isNullOrBlank()) {
+                        val trimmedQuery = query.trim()
+                        val isQueryUrl = trimmedQuery.startsWith("http://", ignoreCase = true) || 
+                                         trimmedQuery.startsWith("https://", ignoreCase = true)
+                        val hasDot = trimmedQuery.contains(".") && 
+                                     !trimmedQuery.startsWith(".") && 
+                                     !trimmedQuery.endsWith(".")
+                        val noSpaces = !trimmedQuery.contains(" ") && 
+                                       !trimmedQuery.contains("\n") && 
+                                       !trimmedQuery.contains("\t")
+                        
+                        if (isQueryUrl || (hasDot && noSpaces)) {
+                            var isLikelyDomain = isQueryUrl
+                            val lastDot = trimmedQuery.lastIndexOf('.')
+                            if (!isLikelyDomain && lastDot > 0 && lastDot < trimmedQuery.length - 1) {
+                                val partAfterDot = trimmedQuery.substring(lastDot + 1).split('/')[0]
+                                val isTldValid = partAfterDot.isNotEmpty() && 
+                                                 partAfterDot.all { it.isLetter() || it.isDigit() } && 
+                                                 partAfterDot.length >= 2
+                                if (isTldValid) {
+                                    isLikelyDomain = true
+                                }
+                            }
+                            
+                            if (isLikelyDomain) {
+                                val targetUrl = if (isQueryUrl) trimmedQuery else "https://$trimmedQuery"
+                                view?.post {
+                                    view.stopLoading()
+                                    view.loadUrl(targetUrl)
+                                }
+                                return true
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            return false
+        }
+
+        private fun handleGoogleHomepageInterception(view: WebView?, url: String): Boolean {
+            return false
+        }
+
         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
             val url = request?.url?.toString() ?: return false
             
+            if (handleGoogleHomepageInterception(view, url)) {
+                return true
+            }
+
+            if (handleGoogleSearchInterception(view, url)) {
+                return true
+            }
+
             // Handle standard HTTP/HTTPS links inside the WebView
             if (url.startsWith("http://") || url.startsWith("https://")) {
                 return false
@@ -155,6 +215,21 @@ fun AdvancedWebView(
         }
 
         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+            if (url != null) {
+                if (handleGoogleHomepageInterception(view, url)) {
+                    view?.stopLoading()
+                    view?.post {
+                        val canGoBack = view.canGoBack()
+                        if (!canGoBack) {
+                            view.loadUrl("https://www.abledrama.top")
+                        }
+                    }
+                    return
+                }
+                if (handleGoogleSearchInterception(view, url)) {
+                    return
+                }
+            }
             super.onPageStarted(view, url, favicon)
             viewModel.updateLoadingStatus(tabId, true, 10)
             viewModel.updateWebThemeColor(tabId, null)
@@ -163,6 +238,19 @@ fun AdvancedWebView(
         override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
             super.doUpdateVisitedHistory(view, url, isReload)
             if (url != null) {
+                if (handleGoogleHomepageInterception(view, url)) {
+                    view?.stopLoading()
+                    view?.post {
+                        val canGoBack = view.canGoBack()
+                        if (!canGoBack) {
+                            view.loadUrl("https://www.abledrama.top")
+                        }
+                    }
+                    return
+                }
+                if (handleGoogleSearchInterception(view, url)) {
+                    return
+                }
                 viewModel.updateCurrentState(tabId, url, view?.title ?: "")
             }
         }

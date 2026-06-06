@@ -91,6 +91,13 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
         _openBrowserTrigger.tryEmit(Unit)
     }
 
+    private val _requestSearchFocus = MutableStateFlow(false)
+    val requestSearchFocus: StateFlow<Boolean> = _requestSearchFocus.asStateFlow()
+
+    fun triggerSearchFocus(focus: Boolean) {
+        _requestSearchFocus.value = focus
+    }
+
     // Local Persistence Streams
     val bookmarks: StateFlow<List<Bookmark>> = repository.bookmarks
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -119,10 +126,10 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
     }
 
     // Multi-tab actions
-    fun createNewTab(url: String = "https://www.abledrama.top") {
+    fun createNewTab(url: String = "browser://home") {
         val newId = UUID.randomUUID().toString()
-        val formattedUrl = formatUrl(url)
-        val newTab = BrowserTab(id = newId, url = formattedUrl, title = "Able Drama")
+        val formattedUrl = if (url == "browser://home") "browser://home" else formatUrl(url)
+        val newTab = BrowserTab(id = newId, url = formattedUrl, title = if (url == "browser://home") "Home" else "Google")
         _tabs.value = _tabs.value + newTab
         _selectedTabId.value = newId
     }
@@ -137,7 +144,7 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
         val currentList = _tabs.value
         if (currentList.size <= 1) {
             val newId = UUID.randomUUID().toString()
-            _tabs.value = listOf(BrowserTab(id = newId, url = "https://www.abledrama.top", title = "Able Drama"))
+            _tabs.value = listOf(BrowserTab(id = newId, url = "browser://home", title = "Home"))
             _selectedTabId.value = newId
             return
         }
@@ -307,13 +314,57 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
         }
     }
 
-    private fun formatUrl(url: String): String {
-        var trimmed = url.trim()
+    fun formatUrl(url: String): String {
+        val trimmed = url.trim()
         if (trimmed.isBlank()) return _homeUrl.value
-        if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
-            trimmed = "https://$trimmed"
+
+        // If it already starts with http:// or https://, return it as is
+        if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
+            return trimmed
         }
-        return trimmed
+
+        // Other standard browser schemes/protocols
+        if (trimmed.startsWith("file://", ignoreCase = true) ||
+            trimmed.startsWith("ftp://", ignoreCase = true) ||
+            trimmed.startsWith("about:", ignoreCase = true) ||
+            trimmed.startsWith("browser://", ignoreCase = true) ||
+            trimmed.startsWith("javascript:", ignoreCase = true)) {
+            return trimmed
+        }
+
+        // Check if there are spaces or newlines. If so, it is definitely a search.
+        if (trimmed.contains(" ") || trimmed.contains("\n") || trimmed.contains("\t")) {
+            val encodedQuery = try {
+                java.net.URLEncoder.encode(trimmed, "UTF-8")
+            } catch (e: Exception) {
+                trimmed
+            }
+            return "https://www.google.com/search?q=$encodedQuery"
+        }
+
+        // Check if matches standard WEB_URL pattern OR lighter check for standard domains like abledrama.com
+        val webUrlPattern = android.util.Patterns.WEB_URL
+        val matchesWebUrl = webUrlPattern.matcher(trimmed).matches()
+        val hasDot = trimmed.contains(".") && !trimmed.startsWith(".") && !trimmed.endsWith(".")
+
+        if (matchesWebUrl || hasDot) {
+            val lastDot = trimmed.lastIndexOf('.')
+            if (lastDot > 0 && lastDot < trimmed.length - 1) {
+                val partAfterDot = trimmed.substring(lastDot + 1).split('/')[0]
+                val isTldValid = partAfterDot.isNotEmpty() && partAfterDot.all { it.isLetter() || it.isDigit() } && partAfterDot.length >= 2
+                if (isTldValid) {
+                    return "https://$trimmed"
+                }
+            }
+        }
+
+        // Otherwise, fallback to Google Search
+        val encodedQuery = try {
+            java.net.URLEncoder.encode(trimmed, "UTF-8")
+        } catch (e: Exception) {
+            trimmed
+        }
+        return "https://www.google.com/search?q=$encodedQuery"
     }
 }
 
