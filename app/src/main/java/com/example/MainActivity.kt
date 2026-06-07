@@ -14,6 +14,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import coil.compose.AsyncImage
 import androidx.compose.animation.*
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
@@ -466,6 +467,7 @@ fun MainAppContent(
     var downloadPendingUrl by remember { mutableStateOf("") }
     var showDownloadManagerDialog by remember { mutableStateOf(false) }
     var showBrowserHistoryDialog by remember { mutableStateOf(false) }
+    var showAboutBrowserDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(currentTab, showUrlBar) {
         MainActivity.isAbleDramaActive = (showUrlBar == false || currentTab == AppTab.ACCOUNT)
@@ -639,6 +641,7 @@ fun MainAppContent(
                             themeColorHex = webThemeColor,
                             tabCount = tabsList.size,
                             isDarkTheme = isDarkTheme,
+                            onToggleDarkTheme = onToggleDarkTheme,
                             onUrlSubmit = { url -> viewModel.loadUrl(url) },
                             onBookmarkToggle = {
                                 viewModel.toggleBookmark()
@@ -673,6 +676,9 @@ fun MainAppContent(
                             onDownloadClick = {
                                 showDownloadManagerDialog = true
                             },
+                            onAboutClick = {
+                                showAboutBrowserDialog = true
+                            },
                             focusRequester = urlBarFocusRequester,
                             shouldFocusImmediately = requestSearchFocus,
                             onFocusTriggeredHandled = { viewModel.triggerSearchFocus(false) }
@@ -698,6 +704,7 @@ fun MainAppContent(
                                             BrowserHomepage(
                                                 viewModel = viewModel,
                                                 tabId = tab.id,
+                                                isDarkTheme = isDarkTheme,
                                                 onUrlFocusTrigger = {
                                                     viewModel.triggerSearchFocus(true)
                                                 },
@@ -769,13 +776,9 @@ fun MainAppContent(
                                         .testTag("floating_post_bookmark_btn"),
                                     shape = CircleShape,
                                     colors = CardDefaults.cardColors(
-                                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
+                                        containerColor = Color.Black.copy(alpha = 0.25f)
                                     ),
-                                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                                    border = BorderStroke(
-                                        width = 1.dp,
-                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
-                                    )
+                                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                                 ) {
                                     Box(
                                         modifier = Modifier.fillMaxSize(),
@@ -784,7 +787,7 @@ fun MainAppContent(
                                         Icon(
                                             imageVector = if (isCustomBookmarked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                                             contentDescription = "Bookmark",
-                                            tint = if (isCustomBookmarked) Color(0xFFE50914) else MaterialTheme.colorScheme.onSurface,
+                                            tint = if (isCustomBookmarked) Color(0xFFE50914) else Color.White,
                                             modifier = Modifier
                                                 .size(26.dp)
                                                 .scale(heartScale)
@@ -875,6 +878,13 @@ fun MainAppContent(
                 onClearAllHistory = {
                     viewModel.clearBrowserHistory()
                 }
+            )
+        }
+
+        if (showAboutBrowserDialog) {
+            AboutBrowserDialog(
+                isDarkTheme = isDarkTheme,
+                onDismissRequest = { showAboutBrowserDialog = false }
             )
         }
 
@@ -1126,6 +1136,7 @@ fun BrowserToolbar(
     isBookmarked: Boolean,
     themeColorHex: String?,
     isDarkTheme: Boolean,
+    onToggleDarkTheme: () -> Unit,
     tabCount: Int,
     onBookmarkToggle: () -> Unit,
     onShareAction: () -> Unit,
@@ -1139,6 +1150,7 @@ fun BrowserToolbar(
     onHistoryClick: () -> Unit = {},
     onDownloadClick: () -> Unit = {},
     onUrlSubmit: (String) -> Unit = {},
+    onAboutClick: () -> Unit = {},
     focusRequester: FocusRequester = remember { FocusRequester() },
     shouldFocusImmediately: Boolean = false,
     onFocusTriggeredHandled: () -> Unit = {}
@@ -1266,13 +1278,22 @@ fun BrowserToolbar(
                     .padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Lock Icon representing secure SSL or Search Icon when typing
-                Icon(
-                    imageVector = if (isEditing) Icons.Default.Search else Icons.Default.Lock,
-                    contentDescription = if (isEditing) "Search" else "SSL Secure",
-                    tint = contentColor.copy(alpha = 0.7f),
-                    modifier = Modifier.size(15.dp)
-                )
+                // Dynamic header branding / Lock / Search
+                if (!isEditing && currentUrl == "browser://home") {
+                    Icon(
+                        imageVector = Icons.Default.Language,
+                        contentDescription = "Browser Header Logo",
+                        tint = contentColor.copy(alpha = 0.7f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                } else {
+                    Icon(
+                        imageVector = if (isEditing) Icons.Default.Search else Icons.Default.Lock,
+                        contentDescription = if (isEditing) "Search" else "SSL Secure",
+                        tint = contentColor.copy(alpha = 0.7f),
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
 
                 Spacer(modifier = Modifier.width(6.dp))
 
@@ -1439,7 +1460,10 @@ fun BrowserToolbar(
                             onHistoryClick = onHistoryClick,
                             onDownloadClick = onDownloadClick,
                             onExitBrowser = onExitBrowser,
+                            isDarkTheme = isDarkTheme,
+                            onToggleDarkTheme = onToggleDarkTheme,
                             onNewTabClick = onPlusClick,
+                            onAboutClick = onAboutClick,
                             onTranslateClick = {
                                 val encodedUrl = try {
                                     java.net.URLEncoder.encode(currentUrl, "UTF-8")
@@ -1972,36 +1996,47 @@ fun MyAccountTab(
                                     Color.hsl(hue.toFloat(), 0.7f, if (isDarkTheme) 0.35f else 0.93f)
                                 }
 
-                                Box(
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .clip(CircleShape)
-                                        .background(circleColor),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    if (isGoogle) {
-                                        Text(
-                                            text = "G",
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 18.sp,
-                                            color = if (isDarkTheme) Color.White else Color(0xFF4285F4)
-                                        )
-                                    } else if (isAbleDrama) {
-                                        Icon(
-                                            imageVector = Icons.Default.MovieFilter,
-                                            contentDescription = null,
-                                            tint = CinemaRed,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    } else {
-                                        val letters = host.replace("www.", "")
-                                        val firstLetter = if (letters.isNotEmpty()) letters.first().uppercase() else "W"
-                                        Text(
-                                            text = firstLetter,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 16.sp,
-                                            color = if (isDarkTheme) Color.White else Color.DarkGray
-                                        )
+                                if (item.thumbnailUrl != null && item.thumbnailUrl.isNotBlank() && item.thumbnailUrl.startsWith("http")) {
+                                    AsyncImage(
+                                        model = item.thumbnailUrl,
+                                        contentDescription = "Thumbnail",
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .clip(CircleShape),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .clip(CircleShape)
+                                            .background(circleColor),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (isGoogle) {
+                                            Text(
+                                                text = "G",
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 18.sp,
+                                                color = if (isDarkTheme) Color.White else Color(0xFF4285F4)
+                                            )
+                                        } else if (isAbleDrama) {
+                                            Icon(
+                                                imageVector = Icons.Default.MovieFilter,
+                                                contentDescription = null,
+                                                tint = CinemaRed,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        } else {
+                                            val letters = host.replace("www.", "")
+                                            val firstLetter = if (letters.isNotEmpty()) letters.first().uppercase() else "W"
+                                            Text(
+                                                text = firstLetter,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 16.sp,
+                                                color = if (isDarkTheme) Color.White else Color.DarkGray
+                                            )
+                                        }
                                     }
                                 }
 
@@ -3675,6 +3710,7 @@ fun BrowserMenuItem(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     testTag: String,
+    isDarkTheme: Boolean,
     onClick: () -> Unit
 ) {
     Row(
@@ -3689,13 +3725,13 @@ fun BrowserMenuItem(
         Icon(
             imageVector = icon,
             contentDescription = label,
-            tint = Color(0xFF5F6368),
+            tint = if (isDarkTheme) Color(0xFFE6E1E5) else Color(0xFF5F6368),
             modifier = Modifier.size(20.dp)
         )
         Spacer(modifier = Modifier.width(16.dp))
         Text(
             text = label,
-            color = Color(0xFF202124),
+            color = if (isDarkTheme) Color.White else Color(0xFF202124),
             fontSize = 14.sp,
             fontWeight = FontWeight.Normal
         )
@@ -3716,8 +3752,11 @@ fun BrowserActionMenuPopup(
     onHistoryClick: () -> Unit,
     onDownloadClick: () -> Unit,
     onExitBrowser: () -> Unit,
+    isDarkTheme: Boolean,
+    onToggleDarkTheme: () -> Unit,
     onNewTabClick: () -> Unit = {},
-    onTranslateClick: () -> Unit = {}
+    onTranslateClick: () -> Unit = {},
+    onAboutClick: () -> Unit = {}
 ) {
     Dialog(
         onDismissRequest = onDismiss,
@@ -3736,9 +3775,9 @@ fun BrowserActionMenuPopup(
                     .padding(top = 52.dp, end = 12.dp)
                     .clickable(enabled = false, onClick = {}),
                 shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
+                colors = CardDefaults.cardColors(containerColor = if (isDarkTheme) Color(0xFF1E1B24) else Color.White),
                 elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                border = BorderStroke(0.5.dp, Color(0xFFE0E0E0))
+                border = BorderStroke(0.5.dp, if (isDarkTheme) Color(0xFF32303A) else Color(0xFFE0E0E0))
             ) {
                 Column(
                     modifier = Modifier
@@ -3753,12 +3792,16 @@ fun BrowserActionMenuPopup(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val iconBg = if (isDarkTheme) Color(0xFF2B2835) else Color(0xFFF1F3F4)
+                        val iconTint = if (isDarkTheme) Color.White else Color(0xFF202124)
+                        val iconDisabledTint = if (isDarkTheme) Color(0xFF49454F) else Color(0xFFC4C7C5)
+
                         // Previous Arrow (Back) Button
                         Box(
                             modifier = Modifier
                                 .size(40.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFFF1F3F4))
+                                .background(iconBg)
                                 .clickable(enabled = canGoBack) {
                                     onDismiss()
                                     onGoBack()
@@ -3768,7 +3811,7 @@ fun BrowserActionMenuPopup(
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "Back",
-                                tint = if (canGoBack) Color(0xFF202124) else Color(0xFFC4C7C5),
+                                tint = if (canGoBack) iconTint else iconDisabledTint,
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -3778,7 +3821,7 @@ fun BrowserActionMenuPopup(
                             modifier = Modifier
                                 .size(40.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFFF1F3F4))
+                                .background(iconBg)
                                 .clickable(enabled = canGoForward) {
                                     onDismiss()
                                     onGoForward()
@@ -3788,7 +3831,7 @@ fun BrowserActionMenuPopup(
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowForward,
                                 contentDescription = "Forward",
-                                tint = if (canGoForward) Color(0xFF202124) else Color(0xFFC4C7C5),
+                                tint = if (canGoForward) iconTint else iconDisabledTint,
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -3798,7 +3841,7 @@ fun BrowserActionMenuPopup(
                             modifier = Modifier
                                 .size(40.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFFF1F3F4))
+                                .background(iconBg)
                                 .clickable {
                                     onDismiss()
                                     onBookmarkToggle()
@@ -3808,7 +3851,7 @@ fun BrowserActionMenuPopup(
                             Icon(
                                 imageVector = if (isBookmarked) Icons.Default.Star else Icons.Default.StarBorder,
                                 contentDescription = "Bookmark",
-                                tint = if (isBookmarked) Color(0xFF1A73E8) else Color(0xFF5F6368),
+                                tint = if (isBookmarked) (if (isDarkTheme) Color(0xFFFFB300) else Color(0xFF1A73E8)) else (if (isDarkTheme) Color(0xFFE6E1E5) else Color(0xFF5F6368)),
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -3818,7 +3861,7 @@ fun BrowserActionMenuPopup(
                             modifier = Modifier
                                 .size(40.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFFF1F3F4))
+                                .background(iconBg)
                                 .clickable {
                                     onDismiss()
                                     onDownloadClick()
@@ -3828,7 +3871,7 @@ fun BrowserActionMenuPopup(
                             Icon(
                                 imageVector = Icons.Default.Download,
                                 contentDescription = "Downloads",
-                                tint = Color(0xFF5F6368),
+                                tint = if (isDarkTheme) Color(0xFFE6E1E5) else Color(0xFF5F6368),
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -3838,7 +3881,7 @@ fun BrowserActionMenuPopup(
                             modifier = Modifier
                                 .size(40.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFFF1F3F4))
+                                .background(iconBg)
                                 .clickable {
                                     onDismiss()
                                     onReload()
@@ -3848,19 +3891,21 @@ fun BrowserActionMenuPopup(
                             Icon(
                                 imageVector = Icons.Default.Refresh,
                                 contentDescription = "Reload",
-                                tint = Color(0xFF5F6368),
+                                tint = if (isDarkTheme) Color(0xFFE6E1E5) else Color(0xFF5F6368),
                                 modifier = Modifier.size(18.dp)
                             )
                         }
                     }
 
-                    HorizontalDivider(color = Color(0xFFE0E0E0), thickness = 0.5.dp, modifier = Modifier.padding(vertical = 4.dp))
+                    val dividerColor = if (isDarkTheme) Color(0xFF32303A) else Color(0xFFE0E0E0)
+                    HorizontalDivider(color = dividerColor, thickness = 0.5.dp, modifier = Modifier.padding(vertical = 4.dp))
 
                     // Menu List Items
                     BrowserMenuItem(
                         icon = Icons.Outlined.AddBox,
                         label = "New tab",
                         testTag = "browser_menu_new_tab",
+                        isDarkTheme = isDarkTheme,
                         onClick = {
                             onDismiss()
                             onNewTabClick()
@@ -3871,6 +3916,7 @@ fun BrowserActionMenuPopup(
                         icon = Icons.Default.History,
                         label = "History",
                         testTag = "browser_menu_history",
+                        isDarkTheme = isDarkTheme,
                         onClick = {
                             onDismiss()
                             onHistoryClick()
@@ -3881,6 +3927,7 @@ fun BrowserActionMenuPopup(
                         icon = Icons.Default.Download,
                         label = "Downloads",
                         testTag = "browser_menu_downloads",
+                        isDarkTheme = isDarkTheme,
                         onClick = {
                             onDismiss()
                             onDownloadClick()
@@ -3891,18 +3938,20 @@ fun BrowserActionMenuPopup(
                         icon = Icons.Default.Bookmark,
                         label = "Bookmarks",
                         testTag = "browser_menu_bookmarks",
+                        isDarkTheme = isDarkTheme,
                         onClick = {
                             onDismiss()
                             onHistoryClick()
                         }
                     )
 
-                    HorizontalDivider(color = Color(0xFFE0E0E0), thickness = 0.5.dp, modifier = Modifier.padding(vertical = 4.dp))
+                    HorizontalDivider(color = dividerColor, thickness = 0.5.dp, modifier = Modifier.padding(vertical = 4.dp))
 
                     BrowserMenuItem(
                         icon = Icons.Default.Share,
                         label = "Share...",
                         testTag = "browser_menu_share",
+                        isDarkTheme = isDarkTheme,
                         onClick = {
                             onDismiss()
                             onShareAction()
@@ -3913,6 +3962,7 @@ fun BrowserActionMenuPopup(
                         icon = Icons.Default.Translate,
                         label = "Translate",
                         testTag = "browser_menu_translate",
+                        isDarkTheme = isDarkTheme,
                         onClick = {
                             onDismiss()
                             onTranslateClick()
@@ -3923,18 +3973,31 @@ fun BrowserActionMenuPopup(
                         icon = Icons.Default.Delete,
                         label = "Delete browsing data",
                         testTag = "browser_menu_delete_data",
+                        isDarkTheme = isDarkTheme,
                         onClick = {
                             onDismiss()
                             onHistoryClick()
                         }
                     )
 
-                    HorizontalDivider(color = Color(0xFFE0E0E0), thickness = 0.5.dp, modifier = Modifier.padding(vertical = 4.dp))
+                    BrowserMenuItem(
+                        icon = Icons.Default.Info,
+                        label = "About Browser",
+                        testTag = "browser_menu_about",
+                        isDarkTheme = isDarkTheme,
+                        onClick = {
+                            onDismiss()
+                            onAboutClick()
+                        }
+                    )
+
+                    HorizontalDivider(color = dividerColor, thickness = 0.5.dp, modifier = Modifier.padding(vertical = 4.dp))
 
                     BrowserMenuItem(
                         icon = Icons.Default.Close,
                         label = "Exit Browser",
                         testTag = "browser_menu_exit",
+                        isDarkTheme = isDarkTheme,
                         onClick = {
                             onDismiss()
                             onExitBrowser()
@@ -4205,44 +4268,101 @@ fun BrowserHomepage(
     onUrlFocusTrigger: () -> Unit,
     onHistoryClick: () -> Unit,
     onDownloadsClick: () -> Unit,
+    isDarkTheme: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val isDark = isDarkTheme
+    var showSplash by rememberSaveable { mutableStateOf(true) }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(if (isDark) Color(0xFF0F0E13) else Color(0xFFF1F3F4))
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        // App Logo/Icon
+    LaunchedEffect(Unit) {
+        if (showSplash) {
+            delay(1200L)
+            showSplash = false
+        }
+    }
+
+    if (showSplash) {
         Box(
-            modifier = Modifier
-                .size(80.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .background(if (isDark) Color(0xFF1E1B24) else Color.White)
-                .padding(14.dp),
+            modifier = modifier
+                .fillMaxSize()
+                .background(if (isDark) Color(0xFF0F1219) else Color(0xFFF8F9FA)),
             contentAlignment = Alignment.Center
         ) {
-            Icon(
-                imageVector = Icons.Default.Language,
-                contentDescription = "Browser Logo",
-                tint = if (isDark) CinemaGold else CinemaRed,
-                modifier = Modifier.size(52.dp)
-            )
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                // Large official beautiful logo
+                Box(
+                    modifier = Modifier
+                        .size(110.dp)
+                        .clip(RoundedCornerShape(28.dp))
+                        .background(if (isDark) Color(0xFF1E1B24) else Color.White)
+                        .padding(18.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Language,
+                        contentDescription = "Able Browser Logo",
+                        tint = if (isDark) CinemaGold else CinemaRed,
+                        modifier = Modifier.size(74.dp)
+                    )
+                }
+                
+                Spacer(modifier = Modifier.height(24.dp))
+                
+                CircularProgressIndicator(
+                    color = if (isDark) CinemaGold else CinemaRed,
+                    strokeWidth = 3.dp,
+                    modifier = Modifier.size(24.dp)
+                )
+                
+                Spacer(modifier = Modifier.height(24.dp))
+                
+                Text(
+                    text = "Secure Companion Browser",
+                    color = if (isDark) Color.LightGray else Color.DarkGray,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = 1.2.sp
+                )
+            }
         }
+    } else {
+        Column(
+            modifier = modifier
+                .fillMaxSize()
+                .background(if (isDark) Color(0xFF0F0E13) else Color(0xFFF1F3F4))
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            // App Logo/Icon
+            Box(
+                modifier = Modifier
+                    .size(80.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(if (isDark) Color(0xFF1E1B24) else Color.White)
+                    .padding(14.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Language,
+                    contentDescription = "Browser Logo",
+                    tint = if (isDark) CinemaGold else CinemaRed,
+                    modifier = Modifier.size(52.dp)
+                )
+            }
 
-        Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-        Text(
-            text = "Able Browser",
-            fontSize = 28.sp,
-            fontWeight = FontWeight.ExtraBold,
-            color = if (isDark) Color.White else Color(0xFF202124),
-            letterSpacing = 0.5.sp
-        )
+            Text(
+                text = "Able Browser",
+                fontSize = 26.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = if (isDark) Color.White else Color(0xFF202124),
+                letterSpacing = 0.5.sp
+            )
 
         Text(
             text = "Search or type address safely",
@@ -4316,12 +4436,33 @@ fun BrowserHomepage(
                         }
                         .padding(8.dp)
                 ) {
+                    val itemShape = if (item.label == "AbleDrama") RoundedCornerShape(10.dp) else CircleShape
                     Box(
                         modifier = Modifier
                             .size(48.dp)
-                            .clip(CircleShape)
-                            .background(if (item.label == "Facebook") Color(0xFF1877F2) else if (isDark) Color(0xFF1E1B24) else Color.White)
-                            .border(1.dp, if (isDark) Color.White.copy(alpha = 0.08f) else Color.LightGray.copy(alpha = 0.3f), CircleShape),
+                            .clip(itemShape)
+                            .then(
+                                if (item.label == "AbleDrama") {
+                                    Modifier.background(
+                                        Brush.verticalGradient(
+                                            colors = listOf(Color(0xFFFFFFFF), Color(0xFFDCDCDC))
+                                        )
+                                    )
+                                } else {
+                                    Modifier.background(
+                                        if (item.label == "Facebook") Color(0xFF1877F2)
+                                        else if (isDark) Color(0xFF1E1B24)
+                                        else Color.White
+                                    )
+                                }
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (item.label == "AbleDrama") Color(0xFF7F7F7F)
+                                        else if (isDark) Color.White.copy(alpha = 0.08f)
+                                        else Color.LightGray.copy(alpha = 0.3f),
+                                shape = itemShape
+                            ),
                         contentAlignment = Alignment.Center
                     ) {
                         if (item.label == "Facebook") {
@@ -4332,6 +4473,42 @@ fun BrowserHomepage(
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.offset(y = (-3).dp)
                             )
+                        } else if (item.label == "YouTube") {
+                            Box(
+                                modifier = Modifier
+                                    .size(width = 28.dp, height = 20.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(Color(0xFFFF0000)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = "YouTube",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        } else if (item.label == "AbleDrama") {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Text(
+                                    text = "A",
+                                    color = Color(0xFFEE1111),
+                                    fontSize = 19.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                    modifier = Modifier.offset(x = 1.dp)
+                                )
+                                Text(
+                                    text = "D",
+                                    color = Color(0xFFFF7A00),
+                                    fontSize = 19.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    modifier = Modifier.offset(x = (-1).dp)
+                                )
+                            }
                         } else {
                             Icon(
                                 imageVector = item.icon,
@@ -4436,7 +4613,8 @@ fun BrowserHomepage(
                 }
             }
         }
-    }
+    } // closes Column
+} // closes else block
 }
 
 data class ShortcutItem(
@@ -4445,4 +4623,150 @@ data class ShortcutItem(
     val icon: androidx.compose.ui.graphics.vector.ImageVector,
     val color: Color
 )
+
+@Composable
+fun AboutBrowserDialog(
+    isDarkTheme: Boolean,
+    onDismissRequest: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismissRequest,
+        properties = DialogProperties(usePlatformDefaultWidth = true)
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isDarkTheme) Color(0xFF131520) else Color.White
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+            border = BorderStroke(
+                width = 1.dp,
+                color = if (isDarkTheme) Color.White.copy(alpha = 0.08f) else Color.LightGray.copy(alpha = 0.4f)
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Large beautifully rendered high quality logo representation
+                Box(
+                    modifier = Modifier
+                        .size(100.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(if (isDarkTheme) Color(0xFF1E1B24) else Color(0xFFF1F3F4))
+                        .padding(18.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Language,
+                        contentDescription = "Able Browser Logo",
+                        tint = if (isDarkTheme) CinemaGold else CinemaRed,
+                        modifier = Modifier.size(64.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text(
+                    text = "Able Browser",
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = if (isDarkTheme) Color.White else Color(0xFF202124),
+                    textAlign = TextAlign.Center
+                )
+
+                Text(
+                    text = "Companion Secure Client v2.4.0",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (isDarkTheme) CinemaGold else CinemaRed,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 16.dp)
+                )
+
+                Text(
+                    text = "A dedicated private web-browsing companion client designed exclusively for movie & drama enthusiasts. Intercepts aggressive redirect loops, filters intrusive ad placements, and offers a secure environment for offline downloading.",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Normal,
+                    lineHeight = 18.sp,
+                    color = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(bottom = 20.dp)
+                )
+
+                // Feature pills
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    val features = listOf(
+                        Triple(Icons.Default.Security, "Secure Sandbox", "Prevents unauthorized browser page redirections."),
+                        Triple(Icons.Default.Block, "Ad Blocking Filter", "Blocks annoying pop-ups on streaming mirrors."),
+                        Triple(Icons.Default.Download, "Supercharged Downloads", "A highly robust system for caching film data safely.")
+                    )
+
+                    features.forEach { (icon, title, desc) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    color = if (isDarkTheme) Color.White.copy(alpha = 0.04f) else Color(0xFFF1F3F4),
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = title,
+                                tint = if (isDarkTheme) CinemaGold else CinemaRed,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = title,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isDarkTheme) Color.White else Color(0xFF202124)
+                                )
+                                Text(
+                                    text = desc,
+                                    fontSize = 11.sp,
+                                    color = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368),
+                                    lineHeight = 14.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Button(
+                    onClick = onDismissRequest,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isDarkTheme) CinemaGold else CinemaRed,
+                        contentColor = if (isDarkTheme) Color.Black else Color.White
+                    ),
+                    shape = RoundedCornerShape(24.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                ) {
+                    Text(
+                        text = "Dismiss",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+        }
+    }
+}
 

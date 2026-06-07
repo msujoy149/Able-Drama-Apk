@@ -258,8 +258,23 @@ fun AdvancedWebView(
         override fun onPageFinished(view: WebView?, url: String?) {
             super.onPageFinished(view, url)
             viewModel.updateLoadingStatus(tabId, false, 100)
-            if (url != null) {
-                viewModel.updateCurrentState(tabId, url, view?.title ?: "")
+            if (url != null && view != null) {
+                view.evaluateJavascript(
+                    "(function() {\n" +
+                    "  var ogImg = document.querySelector('meta[property=\"og:image\"]');\n" +
+                    "  if (ogImg && ogImg.content) return ogImg.content;\n" +
+                    "  var linkImg = document.querySelector('link[rel=\"image_src\"]');\n" +
+                    "  if (linkImg && linkImg.href) return linkImg.href;\n" +
+                    "  var postImg = document.querySelector('article img, .post-body img');\n" +
+                    "  if (postImg && postImg.src) return postImg.src;\n" +
+                    "  return '';\n" +
+                    "})()",
+                    { result ->
+                        val cleanThumb = result?.trim()?.removeSurrounding("\"")?.replace("\\/", "/")
+                        val finalThumb = if (cleanThumb != null && cleanThumb != "null" && cleanThumb.startsWith("http")) cleanThumb else null
+                        viewModel.updateCurrentStateWithHistory(tabId, url, view.title ?: "", finalThumb)
+                    }
+                )
             }
             viewModel.updateNavigationCapabilities(
                 tabId,

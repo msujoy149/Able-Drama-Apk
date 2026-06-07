@@ -18,7 +18,8 @@ data class HistoryItem(
     val url: String,
     val title: String,
     val timestamp: Long = System.currentTimeMillis(),
-    val isBrowser: Boolean = false
+    val isBrowser: Boolean = false,
+    val thumbnailUrl: String? = null
 )
 
 @Entity(tableName = "downloads")
@@ -117,7 +118,7 @@ interface DownloadDao {
     suspend fun deleteDownloadById(id: Long)
 }
 
-@Database(entities = [Bookmark::class, HistoryItem::class, DownloadItem::class], version = 3, exportSchema = false)
+@Database(entities = [Bookmark::class, HistoryItem::class, DownloadItem::class], version = 4, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun browserDao(): BrowserDao
     abstract fun downloadDao(): DownloadDao

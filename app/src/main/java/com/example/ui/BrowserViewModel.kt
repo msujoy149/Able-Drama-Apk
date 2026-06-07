@@ -180,6 +180,10 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
     }
 
     fun updateCurrentState(tabId: String, url: String, title: String) {
+        updateCurrentStateWithHistory(tabId, url, title, null)
+    }
+
+    fun updateCurrentStateWithHistory(tabId: String, url: String, title: String, thumbnailUrl: String? = null) {
         _tabs.value = _tabs.value.map { tab ->
             if (tab.id == tabId) {
                 val cleanTitle = if (title.isNotBlank() && !title.startsWith("http")) title else tab.title
@@ -190,8 +194,51 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
         }
         if (_selectedTabId.value == tabId && url.isNotBlank()) {
             viewModelScope.launch {
-                repository.addHistory(url, title.ifBlank { url }, isBrowser = true)
+                val cleanTitle = title.ifBlank { url }
+                repository.addHistory(url, cleanTitle, isBrowser = true, thumbnailUrl = thumbnailUrl)
+                
+                if (shouldRecordDramaHistory(url)) {
+                    val dramaTitle = getDramaSectionTitle(url, cleanTitle)
+                    repository.addHistory(url, dramaTitle, isBrowser = false, thumbnailUrl = thumbnailUrl)
+                }
             }
+        }
+    }
+
+    fun shouldRecordDramaHistory(url: String): Boolean {
+        val u = url.trim().lowercase()
+        if (!u.contains("abledrama.top") && !u.contains("ablesrama.top")) return false
+        if (u.contains("abledrama.top/history") || u.contains("ablesrama.top/history") || u.contains("/history")) return false
+        
+        // Match Movies, Drama, Anime, Short Drama, Web Series and portals
+        if (u.contains("search/label/movies") || u.contains("category/movies")) return true
+        if (u.contains("search/label/drama") || u.contains("category/drama") || u.contains("category/k-drama") || u.contains("category/bengali")) return true
+        if (u.contains("search/label/anime") || u.contains("category/anime")) return true
+        if (u.contains("search/label/short") || u.contains("category/short")) return true
+        if (u.contains("search/label/web") || u.contains("category/web")) return true
+        if (u.contains("search/label/ongoin")) return true
+        if (u.contains("/p/")) return true
+        
+        // Post pages
+        if (u.contains(".html") || u.contains("/20")) return true
+        return false
+    }
+
+    private fun getDramaSectionTitle(url: String, currentTitle: String): String {
+        val u = url.trim().lowercase()
+        return when {
+            u.contains("search/label/movies") || u.contains("category/movies") -> "Movies Portal"
+            u.contains("search/label/drama") || u.contains("category/drama") -> "Drama Portal"
+            u.contains("category/k-drama") -> "Korean Drama Portal"
+            u.contains("category/bengali") -> "Bengali Drama Portal"
+            u.contains("search/label/anime") || u.contains("category/anime") -> "Anime Portal"
+            u.contains("search/label/short") || u.contains("category/short") -> "Short Drama Portal"
+            u.contains("search/label/web") || u.contains("category/web") -> "Web Series Portal"
+            u.contains("search/label/ongoin") -> "Ongoing Uploads Portal"
+            u.contains("/p/how-to-download.html") -> "How to Download Guide"
+            u.contains("/p/request-file-form.html") -> "Request Movie/Drama Form"
+            u.contains("/p/dmca-remove-your-file.html") -> "DMCA Takedown Form"
+            else -> currentTitle
         }
     }
 

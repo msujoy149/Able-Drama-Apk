@@ -29,16 +29,60 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.net.Uri
+import android.provider.DocumentsContract
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.example.data.DownloadItem
 import com.example.data.DownloadRepository
 import com.example.util.DownloadEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.DecimalFormat
+
+// Helper function to resolve physical path from SAF tree URI
+fun getPathFromTreeUri(context: Context, uri: Uri): String? {
+    try {
+        val documentId = DocumentsContract.getTreeDocumentId(uri)
+        val parts = documentId.split(":")
+        if (parts.size >= 2) {
+            val type = parts[0]
+            val relativePath = parts[1]
+            if ("primary".equals(type, ignoreCase = true)) {
+                return Environment.getExternalStorageDirectory().absolutePath + "/" + relativePath
+            } else {
+                // Secondary SD Card/Memory storage
+                val externalDirs = context.getExternalFilesDirs(null)
+                for (dir in externalDirs) {
+                    if (dir != null) {
+                        val path = dir.absolutePath
+                        val index = path.indexOf("/Android/data")
+                        if (index != -1) {
+                            val storageRoot = path.substring(0, index)
+                            if (storageRoot.contains(type)) {
+                                return "$storageRoot/$relativePath"
+                            }
+                        }
+                    }
+                }
+                // Fallback guess
+                val sdCardFile = File("/storage/$type")
+                if (sdCardFile.exists()) {
+                    return "/storage/$type/$relativePath"
+                }
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    return null
+}
 
 // Storage Information Finder
 fun getStorageStats(context: Context): String {
@@ -74,7 +118,7 @@ fun formatByteSize(bytes: Long): String {
     }
 }
 
-// 1DM-Style "Download File!" Dialog (Screenshot 1)
+// 1DM-Style "Download File!" Dialog (Screenshot)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DownloadFileDialog(
@@ -85,48 +129,97 @@ fun DownloadFileDialog(
 ) {
     val context = LocalContext.current
     var url by remember { mutableStateOf(initialUrl) }
-    var fileName by remember { mutableStateOf("loading_details...") }
+    var referrerUrl by remember { mutableStateOf("") }
+    var fileName by remember { mutableStateOf(if (initialUrl.isNotBlank()) "loading_details..." else "") }
     var fileExtension by remember { mutableStateOf("mp4") }
     var fileSize by remember { mutableLongStateOf(0L) }
     var isResumeSupported by remember { mutableStateOf(true) }
-    var isProbing by remember { mutableStateOf(true) }
+    var isProbing by remember { mutableStateOf(false) }
+    
+    val sharedPrefs = remember { context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE) }
+    var storageMode by remember { mutableStateOf(sharedPrefs.getString("storage_mode", "public") ?: "public") }
 
-    // Probing URL Header options to match screenshot parameters
-    LaunchedEffect(initialUrl) {
-        DownloadEngine.probeUrl(initialUrl) { resolvedName, size, resume ->
-            isProbing = false
-            fileSize = size
-            isResumeSupported = resume
+    // Probing URL Header options to match screenshot parameters with debounce
+    var lastProbedUrl by remember { mutableStateOf("") }
 
-            val dotIndex = resolvedName.lastIndexOf('.')
-            if (dotIndex != -1 && dotIndex < resolvedName.length - 1) {
-                fileName = resolvedName.substring(0, dotIndex)
-                fileExtension = resolvedName.substring(dotIndex + 1)
-            } else {
-                fileName = resolvedName
-                fileExtension = "mp4"
+    LaunchedEffect(url) {
+        val trimmed = url.trim()
+        if (trimmed.startsWith("http") && trimmed != lastProbedUrl) {
+            delay(1000) // 1 second debounce to prevent spamming
+            if (trimmed == url.trim()) {
+                isProbing = true
+                lastProbedUrl = trimmed
+                DownloadEngine.probeUrl(trimmed) { resolvedName, size, resume ->
+                    isProbing = false
+                    fileSize = size
+                    isResumeSupported = resume
+
+                    val dotIndex = resolvedName.lastIndexOf('.')
+                    if (dotIndex != -1 && dotIndex < resolvedName.length - 1) {
+                        fileName = resolvedName.substring(0, dotIndex)
+                        fileExtension = resolvedName.substring(dotIndex + 1)
+                    } else {
+                        fileName = resolvedName
+                        fileExtension = "mp4"
+                    }
+                }
             }
+        } else if (trimmed.isBlank()) {
+            isProbing = false
+            fileSize = 0L
+            fileName = ""
+            fileExtension = "mp4"
         }
     }
 
-    // Default Storage options - Safely save to the phone's public download directory under "Able Drama"
-    val defaultDir = remember(context) {
+    // Default Storage options - Safely save according to user preference
+    val defaultDir = remember(context, storageMode) {
+        val mode = storageMode
         try {
-            val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            val sub = File(rootDownloadDir, "Able Drama")
-            if (!sub.exists()) {
-                sub.mkdirs()
-            }
-            if (sub.exists() && sub.canWrite()) {
-                sub
-            } else {
-                // Fallback to application standard external downloads directory
-                val base = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
-                val fallbackSub = File(base, "Able Drama")
-                if (!fallbackSub.exists()) {
-                    fallbackSub.mkdirs()
+            if (mode == "public") {
+                val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                val sub = File(rootDownloadDir, "Able Drama")
+                if (!sub.exists()) {
+                    sub.mkdirs()
                 }
-                fallbackSub
+                if (sub.exists() && sub.canWrite()) {
+                    sub
+                } else {
+                    val base = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+                    val fallbackSub = File(base, "Able Drama")
+                    if (!fallbackSub.exists()) {
+                        fallbackSub.mkdirs()
+                    }
+                    fallbackSub
+                }
+            } else if (mode == "custom") {
+                val customPath = sharedPrefs.getString("custom_storage_path", null)
+                if (!customPath.isNullOrEmpty()) {
+                    val customDir = File(customPath)
+                    if (!customDir.exists()) {
+                        customDir.mkdirs()
+                    }
+                    if (customDir.exists()) {
+                        customDir
+                    } else {
+                        val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                        val sub = File(rootDownloadDir, "Able Drama")
+                        if (!sub.exists()) sub.mkdirs()
+                        sub
+                    }
+                } else {
+                    val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                    val sub = File(rootDownloadDir, "Able Drama")
+                    if (!sub.exists()) sub.mkdirs()
+                    sub
+                }
+            } else {
+                val base = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+                val sub = File(base, "Able Drama")
+                if (!sub.exists()) {
+                    sub.mkdirs()
+                }
+                sub
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -153,8 +246,30 @@ fun DownloadFileDialog(
         }
     }
 
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val takeFlags: Int = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                context.contentResolver.takePersistableUriPermission(uri, takeFlags)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            val customPath = getPathFromTreeUri(context, uri)
+            if (customPath != null) {
+                storageMode = "custom"
+                sharedPrefs.edit().putString("storage_mode", "custom").putString("custom_storage_path", customPath).apply()
+                Toast.makeText(context, "Location updated: $customPath", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(context, "Could not resolve physical folder path", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     // Interactive Checkbox States
-    var useWebpageTitle by remember { mutableStateOf(true) }
+    var useWebpageTitle by remember { mutableStateOf(false) }
     var wifiOnly by remember { mutableStateOf(false) }
     var retryOnFail by remember { mutableStateOf(true) }
     var useProxy by remember { mutableStateOf(false) }
@@ -171,7 +286,7 @@ fun DownloadFileDialog(
                 .fillMaxWidth()
                 .padding(16.dp)
                 .wrapContentHeight(),
-            shape = RoundedCornerShape(24.dp),
+            shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
         ) {
@@ -180,7 +295,7 @@ fun DownloadFileDialog(
                     .fillMaxWidth()
                     .padding(20.dp)
             ) {
-                // Header Row
+                // Header Row (Matches Title "Download file!" and top-right icons in screenshot)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -190,35 +305,41 @@ fun DownloadFileDialog(
                         text = "Download file!",
                         style = MaterialTheme.typography.titleLarge.copy(
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.onSurface
                         )
                     )
-                    Icon(
-                        imageVector = Icons.Default.CloudDownload,
-                        contentDescription = "Database Icon",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(28.dp)
-                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Icon(
+                            imageVector = Icons.Default.Storage, // Database/list format icon
+                            contentDescription = "Database Icon",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Icon(
+                            imageVector = Icons.Default.Language, // Globe icon representing web links
+                            contentDescription = "Web Icon",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Link (Resume Info Row)
+                // Link: row (Matches Screenshot with Copy/Share buttons)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val resumeLabel = if (isResumeSupported) "Yes" else "No"
-                    val resumeColor = if (isResumeSupported) Color(0xFF4CAF50) else Color(0xFFF44336)
-                    Row {
-                        Text(text = "Link (Resume: ", fontSize = 14.sp)
-                        Text(text = resumeLabel, fontSize = 14.sp, color = resumeColor, fontWeight = FontWeight.Bold)
-                        Text(text = ")", fontSize = 14.sp)
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        IconButton(onClick = {
+                    Text(
+                        text = "Link:",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    IconButton(
+                        onClick = {
                             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                             val clipData = clipboard?.primaryClip
                             if (clipData != null && clipData.itemCount > 0) {
@@ -228,37 +349,84 @@ fun DownloadFileDialog(
                                     Toast.makeText(context, "Link pasted!", Toast.LENGTH_SHORT).show()
                                 }
                             }
-                        }) {
-                            Icon(imageVector = Icons.Default.ContentCopy, contentDescription = "Paste Link", modifier = Modifier.size(20.dp))
-                        }
-                        IconButton(onClick = { /* Preview Media */ }) {
-                            Icon(imageVector = Icons.Default.PlayArrow, contentDescription = "Play Inline", modifier = Modifier.size(20.dp))
-                        }
-                        IconButton(onClick = { /* Share Media */ }) {
-                            Icon(imageVector = Icons.Default.Share, contentDescription = "Share URL", modifier = Modifier.size(20.dp))
-                        }
+                        },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "Paste Link",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            if (url.isNotBlank()) {
+                                val sendIntent: android.content.Intent = android.content.Intent().apply {
+                                    action = android.content.Intent.ACTION_SEND
+                                    putExtra(android.content.Intent.EXTRA_TEXT, url)
+                                    type = "text/plain"
+                                }
+                                val shareIntent = android.content.Intent.createChooser(sendIntent, null)
+                                context.startActivity(shareIntent)
+                            }
+                        },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Share,
+                            contentDescription = "Share URL",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
                 // Link Input Textfield
                 OutlinedTextField(
                     value = url,
                     onValueChange = { url = it },
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    textStyle = TextStyle(fontSize = 13.sp),
-                    maxLines = 3,
-                    trailingIcon = {
-                        Icon(imageVector = Icons.Default.Edit, contentDescription = "Edit link")
-                    }
+                    shape = RoundedCornerShape(8.dp),
+                    textStyle = TextStyle(fontSize = 14.sp),
+                    placeholder = { Text("Download link", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.outline,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+                    )
                 )
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                // Save As: Section
-                Text(text = "Save as:", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                // Download/Referrer page link Field (Matches Screenshot)
+                Text(
+                    text = "Download/Referrer page link",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = referrerUrl,
+                    onValueChange = { referrerUrl = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    textStyle = TextStyle(fontSize = 14.sp),
+                    placeholder = { Text("leave empty if not sure", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.outline,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+                    )
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Save As: Section (Matches Screenshot)
+                Text(text = "Save as:", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f))
                 Spacer(modifier = Modifier.height(4.dp))
 
                 Row(
@@ -270,103 +438,163 @@ fun DownloadFileDialog(
                         value = fileName,
                         onValueChange = { fileName = it },
                         modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RoundedCornerShape(8.dp),
                         singleLine = true,
+                        placeholder = { Text("File name", fontSize = 14.sp) },
                         textStyle = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium)
                     )
                     OutlinedTextField(
                         value = fileExtension,
                         onValueChange = { fileExtension = it },
-                        modifier = Modifier.width(80.dp),
-                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.width(110.dp),
+                        shape = RoundedCornerShape(8.dp),
                         singleLine = true,
+                        placeholder = { Text("Extension", fontSize = 14.sp) },
                         textStyle = TextStyle(fontSize = 14.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                     )
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // File size area
-                Text(
-                    text = if (isProbing) "Fetching size..." else formatByteSize(fileSize),
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+                // File size area (Matches Screenshot)
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Text(text = "Size: ", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f))
+                    Text(
+                        text = if (isProbing) "Fetching size..." else formatByteSize(fileSize),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Storage statistics
+                // Storage statistics (Matches Screenshot)
                 val storageLabel = remember(context) { getStorageStats(context) }
                 Text(
                     text = storageLabel,
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontWeight = FontWeight.Medium
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Path directory text field
+                // Path directory text field + Folder picker launcher (Matches Screenshot)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(imageVector = Icons.Default.History, contentDescription = "Storage Clock Icon", tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                    OutlinedTextField(
-                        value = displayPath,
-                        onValueChange = {},
-                        readOnly = true,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(10.dp),
-                        textStyle = TextStyle(fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f))
+                    Icon(
+                        imageVector = Icons.Default.History,
+                        contentDescription = "Storage Clock Icon",
+                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                        modifier = Modifier.size(22.dp)
                     )
-                    IconButton(onClick = { /* pick another directory */ }) {
-                        Icon(imageVector = Icons.Default.Folder, contentDescription = "Pick folder", tint = MaterialTheme.colorScheme.primary)
+                    
+                    Text(
+                        text = displayPath,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier
+                            .weight(1f)
+                            .background(
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f),
+                                shape = RoundedCornerShape(4.dp)
+                            )
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                    )
+
+                    IconButton(
+                        onClick = {
+                            try {
+                                folderPickerLauncher.launch(null)
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Error: Use browser settings to configure storage folder", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DriveFolderUpload,
+                            contentDescription = "Pick folder",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
                     }
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Options with checkboxes (1DM Style grid/list)
+                // Options with checkboxes (Formatted exactly like the 3-row grid in screenshot)
                 Column(
-                    modifier = Modifier.heightIn(max = 180.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = useWebpageTitle, onCheckedChange = { useWebpageTitle = it })
-                        Text(text = "Use webpage title as file name", fontSize = 13.sp)
+                    // Row 1: Wifi only (orange text and box), Retry, Use proxy
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = wifiOnly,
+                                onCheckedChange = { wifiOnly = it },
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = Color(0xFFFF5722),
+                                    uncheckedColor = Color(0xFFFF5722)
+                                )
+                            )
+                            Text(text = "Wifi only", fontSize = 13.sp, color = Color(0xFFFF5722), fontWeight = FontWeight.Bold)
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = retryOnFail, onCheckedChange = { retryOnFail = it })
+                            Text(text = "Retry", fontSize = 13.sp)
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = useProxy, onCheckedChange = { useProxy = it })
+                            Text(text = "Use proxy", fontSize = 13.sp)
+                        }
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = wifiOnly, onCheckedChange = { wifiOnly = it })
-                        Text(text = "Wifi only", fontSize = 13.sp, color = Color(0xFFFF9800), fontWeight = FontWeight.Bold)
+
+                    // Row 2: Hidden file, Use advance download method
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = hiddenFile, onCheckedChange = { hiddenFile = it })
+                            Text(text = "Hidden file", fontSize = 13.sp)
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = useAdvancedDownloadMethod, onCheckedChange = { useAdvancedDownloadMethod = it })
+                            Text(text = "Use advance download method", fontSize = 13.sp)
+                        }
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = retryOnFail, onCheckedChange = { retryOnFail = it })
-                        Text(text = "Retry", fontSize = 13.sp)
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Checkbox(checked = useProxy, onCheckedChange = { useProxy = it })
-                        Text(text = "Use proxy", fontSize = 13.sp)
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Checkbox(checked = hiddenFile, onCheckedChange = { hiddenFile = it })
-                        Text(text = "Hidden file", fontSize = 13.sp)
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = useAdvancedDownloadMethod, onCheckedChange = { useAdvancedDownloadMethod = it })
-                        Text(text = "Use advance download method", fontSize = 13.sp)
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = advanceOption, onCheckedChange = { advanceOption = it })
-                        Text(text = "Advance option", fontSize = 13.sp)
+
+                    // Row 3: Advance option
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = advanceOption, onCheckedChange = { advanceOption = it })
+                            Text(text = "Advance option", fontSize = 13.sp)
+                        }
                     }
                 }
 
                 Spacer(modifier = Modifier.height(20.dp))
 
-                // Bottom Buttons row
+                // Bottom Buttons row (ADD on left-aligned end, CANCEL & CONNECT on right-aligned end)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TextButton(onClick = {
@@ -391,18 +619,18 @@ fun DownloadFileDialog(
                             onDismissRequest()
                         }
                     }) {
-                        Text(text = "ADD", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        Text(text = "ADD", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                     }
                     
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.weight(1f))
                     
                     TextButton(onClick = onDismissRequest) {
-                        Text(text = "CANCEL", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        Text(text = "CANCEL", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontWeight = FontWeight.Bold, fontSize = 15.sp)
                     }
 
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
 
-                    Button(
+                    TextButton(
                         onClick = {
                             coroutineScope.launch {
                                 val safeName = if (fileName.isNotBlank()) "$fileName.$fileExtension" else "video_file.$fileExtension"
@@ -426,10 +654,9 @@ fun DownloadFileDialog(
                                 Toast.makeText(context, "Download started!", Toast.LENGTH_SHORT).show()
                                 onDismissRequest()
                             }
-                        },
-                        shape = RoundedCornerShape(12.dp)
+                        }
                     ) {
-                        Text(text = "START", fontWeight = FontWeight.Bold)
+                        Text(text = "CONNECT", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                     }
                 }
             }
@@ -453,12 +680,131 @@ fun DownloadManagerDialog(
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabsList = listOf("ALL", "DOWNLOADING", "FINISHED", "ERROR")
 
-    val filteredDownloads = remember(allDownloads, selectedTab) {
-        when (selectedTab) {
+    val sharedPrefs = remember { context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE) }
+    val storageMode = remember { mutableStateOf(sharedPrefs.getString("storage_mode", "public") ?: "public") }
+
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val takeFlags: Int = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                context.contentResolver.takePersistableUriPermission(uri, takeFlags)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            val customPath = getPathFromTreeUri(context, uri)
+            if (customPath != null) {
+                storageMode.value = "custom"
+                sharedPrefs.edit().putString("storage_mode", "custom").putString("custom_storage_path", customPath).apply()
+                Toast.makeText(context, "Location updated: $customPath", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(context, "Could not resolve physical folder path", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    var currentSortBy by remember {
+        mutableStateOf(sharedPrefs.getString("download_sort_by", "date_desc") ?: "date_desc")
+    }
+
+    val filteredDownloads = remember(allDownloads, selectedTab, currentSortBy) {
+        val baseList = when (selectedTab) {
             1 -> allDownloads.filter { it.status == "DOWNLOADING" }
             2 -> allDownloads.filter { it.status == "FINISHED" }
             3 -> allDownloads.filter { it.status == "ERROR" }
             else -> allDownloads
+        }
+        
+        when (currentSortBy) {
+            "date_desc" -> baseList.sortedByDescending { it.timestamp }
+            "date_asc" -> baseList.sortedBy { it.timestamp }
+            "size_desc" -> baseList.sortedByDescending { it.fileSize }
+            "size_asc" -> baseList.sortedBy { it.fileSize }
+            "name_asc" -> baseList.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.fileName })
+            "name_desc" -> baseList.sortedWith(compareByDescending(String.CASE_INSENSITIVE_ORDER) { it.fileName })
+            else -> baseList
+        }
+    }
+
+    var concurrentDownloadsLimit by remember { 
+        mutableIntStateOf(sharedPrefs.getInt("concurrent_downloads_limit", 3)) 
+    }
+    
+    var showMenu by remember { mutableStateOf(false) }
+    var showConcurrentDownloadsDialog by remember { mutableStateOf(false) }
+    var showDownloadPathDialog by remember { mutableStateOf(false) }
+    var showBatteryOptimizationDialog by remember { mutableStateOf(false) }
+    var showSortDialog by remember { mutableStateOf(false) }
+    var showAppInfoDialog by remember { mutableStateOf(false) }
+    var showDownloadStatsDialog by remember { mutableStateOf(false) }
+    val defaultDir = remember(context, storageMode.value) {
+        val mode = storageMode.value
+        try {
+            if (mode == "public") {
+                val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                val sub = File(rootDownloadDir, "Able Drama")
+                if (!sub.exists()) {
+                    sub.mkdirs()
+                }
+                if (sub.exists() && sub.canWrite()) {
+                    sub
+                } else {
+                    val base = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+                    val fallbackSub = File(base, "Able Drama")
+                    if (!fallbackSub.exists()) {
+                        fallbackSub.mkdirs()
+                    }
+                    fallbackSub
+                }
+            } else if (mode == "custom") {
+                val customPath = sharedPrefs.getString("custom_storage_path", null)
+                if (!customPath.isNullOrEmpty()) {
+                    val customDir = File(customPath)
+                    if (!customDir.exists()) {
+                        customDir.mkdirs()
+                    }
+                    if (customDir.exists()) {
+                        customDir
+                    } else {
+                        val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                        val sub = File(rootDownloadDir, "Able Drama")
+                        if (!sub.exists()) sub.mkdirs()
+                        sub
+                    }
+                } else {
+                    val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                    val sub = File(rootDownloadDir, "Able Drama")
+                    if (!sub.exists()) sub.mkdirs()
+                    sub
+                }
+            } else {
+                val base = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+                val sub = File(base, "Able Drama")
+                if (!sub.exists()) {
+                    sub.mkdirs()
+                }
+                sub
+            }
+        } catch (e: Exception) {
+            val base = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+            val fallbackSub = File(base, "Able Drama")
+            try {
+                if (!fallbackSub.exists()) {
+                    fallbackSub.mkdirs()
+                }
+            } catch (ex: Exception) {}
+            fallbackSub
+        }
+    }
+    
+    val displayPath = remember(defaultDir) {
+        val p = defaultDir.absolutePath
+        if (p.contains("/emulated/0/")) {
+            "/storage/emulated/0/" + p.substringAfter("/emulated/0/")
+        } else {
+            p
         }
     }
 
@@ -485,6 +831,7 @@ fun DownloadManagerDialog(
                             }
                         },
                         actions = {
+                            // Delete button (Clear downloads)
                             IconButton(onClick = {
                                 coroutineScope.launch {
                                     allDownloads.forEach {
@@ -497,6 +844,147 @@ fun DownloadManagerDialog(
                                 }
                             }) {
                                 Icon(imageVector = Icons.Default.Delete, contentDescription = "Clear All")
+                            }
+
+                            // 3-dot Menu Toggle Button
+                            Box {
+                                IconButton(onClick = { showMenu = true }) {
+                                    Icon(imageVector = Icons.Default.MoreVert, contentDescription = "More Options")
+                                }
+                                DropdownMenu(
+                                    expanded = showMenu,
+                                    onDismissRequest = { showMenu = false }
+                                ) {
+                                    // DOWNLOAD SETTINGS
+                                    Text(
+                                        text = "Download Settings",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Maximum simultaneous downloads") },
+                                        leadingIcon = { Icon(Icons.Default.Layers, contentDescription = null) },
+                                        onClick = {
+                                            showMenu = false
+                                            showConcurrentDownloadsDialog = true
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Sort downloads order") },
+                                        leadingIcon = { Icon(Icons.Default.Sort, contentDescription = null) },
+                                        onClick = {
+                                            showMenu = false
+                                            showSortDialog = true
+                                        }
+                                    )
+                                    
+                                    HorizontalDivider()
+                                    // STORAGE SETTINGS
+                                    Text(
+                                        text = "Storage Settings",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Download location/path") },
+                                        leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null) },
+                                        onClick = {
+                                            showMenu = false
+                                            showDownloadPathDialog = true
+                                        }
+                                    )
+                                    
+                                    HorizontalDivider()
+                                    // BATTERY SETTINGS
+                                    Text(
+                                        text = "Battery Settings",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Battery & Background Performance") },
+                                        leadingIcon = { Icon(Icons.Default.BatteryChargingFull, contentDescription = null) },
+                                        onClick = {
+                                            showMenu = false
+                                            showBatteryOptimizationDialog = true
+                                        }
+                                    )
+                                    
+                                    HorizontalDivider()
+                                    // ADDITIONAL USEFUL OPTIONS
+                                    Text(
+                                        text = "Additional Options",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Download Statistics") },
+                                        leadingIcon = { Icon(Icons.Default.BarChart, contentDescription = null) },
+                                        onClick = {
+                                            showMenu = false
+                                            showDownloadStatsDialog = true
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Retry Failed Downloads") },
+                                        leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                                        onClick = {
+                                            showMenu = false
+                                            coroutineScope.launch {
+                                                val failedCount = allDownloads.count { it.status == "ERROR" }
+                                                allDownloads.forEach {
+                                                    if (it.status == "ERROR") {
+                                                        DownloadEngine.startDownload(context, it.id, this)
+                                                    }
+                                                }
+                                                Toast.makeText(context, "Retrying $failedCount failed downloads", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Clear Completed Downloads") },
+                                        leadingIcon = { Icon(Icons.Default.DoneAll, contentDescription = null) },
+                                        onClick = {
+                                            showMenu = false
+                                            coroutineScope.launch {
+                                                val completed = allDownloads.filter { it.status == "FINISHED" }
+                                                completed.forEach { downloadRepository.deleteDownload(it) }
+                                                Toast.makeText(context, "Cleared ${completed.size} completed items", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Clear Failed Downloads") },
+                                        leadingIcon = { Icon(Icons.Default.ErrorOutline, contentDescription = null) },
+                                        onClick = {
+                                            showMenu = false
+                                            coroutineScope.launch {
+                                                val failed = allDownloads.filter { it.status == "ERROR" }
+                                                failed.forEach { downloadRepository.deleteDownload(it) }
+                                                Toast.makeText(context, "Cleared ${failed.size} failed items", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    )
+                                    
+                                    HorizontalDivider()
+                                    // APP INFO
+                                    DropdownMenuItem(
+                                        text = { Text("About & Version Info") },
+                                        leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
+                                        onClick = {
+                                            showMenu = false
+                                            showAppInfoDialog = true
+                                        }
+                                    )
+                                }
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(
@@ -533,58 +1021,27 @@ fun DownloadManagerDialog(
                 }
             },
             floatingActionButton = {
-                // Floating Action Button + matching screenshot to add link manually
+                // Clicking the FAB (+) now directly launches the exact, fully matching Download file pop-up dialog
                 var showAddLinkDialog by remember { mutableStateOf(false) }
                 
                 FloatingActionButton(
                     onClick = { showAddLinkDialog = true },
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = MaterialTheme.colorScheme.onPrimary,
-                    shape = CircleShape
+                    shape = CircleShape,
+                    modifier = Modifier
+                        .navigationBarsPadding()
+                        .padding(bottom = 16.dp, end = 16.dp)
                 ) {
                     Icon(imageVector = Icons.Default.Add, contentDescription = "Add Download Link")
                 }
 
                 if (showAddLinkDialog) {
-                    var manualUrl by remember { mutableStateOf("") }
-                    AlertDialog(
+                    DownloadFileDialog(
+                        initialUrl = "",
                         onDismissRequest = { showAddLinkDialog = false },
-                        title = { Text(text = "Add manual link", fontWeight = FontWeight.Bold) },
-                        text = {
-                            Column {
-                                Text(text = "Paste a URL below to start the download inside the custom downloader:", fontSize = 14.sp)
-                                Spacer(modifier = Modifier.height(12.dp))
-                                OutlinedTextField(
-                                    value = manualUrl,
-                                    onValueChange = { manualUrl = it },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(12.dp),
-                                    placeholder = { Text(text = "https://example.com/movie.mp4") },
-                                    singleLine = true
-                                )
-                            }
-                        },
-                        confirmButton = {
-                            Button(
-                                onClick = {
-                                    showAddLinkDialog = false
-                                    if (manualUrl.isNotBlank()) {
-                                        coroutineScope.launch {
-                                            // Show download configuration dialog for this URL!
-                                            // Dismissing this allows opening the configuration dialog immediately
-                                            // We schedule a minor delay
-                                        }
-                                    }
-                                }
-                            ) {
-                                Text(text = "Next")
-                            }
-                        },
-                        dismissButton = {
-                            TextButton(onClick = { showAddLinkDialog = false }) {
-                                Text(text = "Cancel")
-                            }
-                        }
+                        downloadRepository = downloadRepository,
+                        coroutineScope = coroutineScope
                     )
                 }
             }
@@ -617,7 +1074,7 @@ fun DownloadManagerDialog(
                 } else {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(12.dp),
+                        contentPadding = PaddingValues(start = 12.dp, top = 12.dp, end = 12.dp, bottom = 88.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(filteredDownloads, key = { it.id }) { item ->
@@ -631,6 +1088,647 @@ fun DownloadManagerDialog(
                 }
             }
         }
+
+        // Sub Settings Overlays
+        if (showConcurrentDownloadsDialog) {
+            AlertDialog(
+                onDismissRequest = { showConcurrentDownloadsDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Layers,
+                            contentDescription = "Limits icon",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Download Limits",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column {
+                        Text(
+                            text = "Set the maximum number of files that can be downloaded simultaneously:",
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        listOf(1, 2, 3, 5, 999).forEach { limit ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        concurrentDownloadsLimit = limit
+                                        sharedPrefs.edit().putInt("concurrent_downloads_limit", limit).apply()
+                                        showConcurrentDownloadsDialog = false
+                                        val limitStr = if (limit == 999) "Unlimited" else "$limit files"
+                                        Toast.makeText(context, "$limitStr simultaneous downloads limit stored!", Toast.LENGTH_SHORT).show()
+                                    }
+                                    .padding(vertical = 12.dp, horizontal = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = concurrentDownloadsLimit == limit,
+                                    onClick = {
+                                        concurrentDownloadsLimit = limit
+                                        sharedPrefs.edit().putInt("concurrent_downloads_limit", limit).apply()
+                                        showConcurrentDownloadsDialog = false
+                                        val limitStr = if (limit == 999) "Unlimited" else "$limit files"
+                                        Toast.makeText(context, "$limitStr simultaneous downloads limit stored!", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = when (limit) {
+                                        3 -> "3 Downloads (Recommended)"
+                                        999 -> "Unlimited (Maximum concurrent speed)"
+                                        1 -> "1 Download"
+                                        else -> "$limit Downloads"
+                                    },
+                                    fontSize = 15.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showConcurrentDownloadsDialog = false }) {
+                        Text("Dismiss")
+                    }
+                }
+            )
+        }
+
+        if (showDownloadPathDialog) {
+            AlertDialog(
+                onDismissRequest = { showDownloadPathDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Folder,
+                            contentDescription = "Folder icon",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Download Save Location",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column {
+                        Text(
+                            text = "Choose the download destination or save location:",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Public option
+                        val isPublicSelected = (storageMode.value == "public")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    storageMode.value = "public"
+                                    sharedPrefs.edit().putString("storage_mode", "public").apply()
+                                    Toast.makeText(context, "Location source updated!", Toast.LENGTH_SHORT).show()
+                                }
+                                .padding(vertical = 10.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = isPublicSelected,
+                                onClick = {
+                                    storageMode.value = "public"
+                                    sharedPrefs.edit().putString("storage_mode", "public").apply()
+                                    Toast.makeText(context, "Location source updated!", Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = "Default Download Folder (Public)",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Internal Storage /Download/Able Drama",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        // Custom option
+                        val isCustomSelected = (storageMode.value == "custom")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    try {
+                                        folderPickerLauncher.launch(null)
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Storage picker not supported or error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                .padding(vertical = 10.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = isCustomSelected,
+                                onClick = {
+                                    try {
+                                        folderPickerLauncher.launch(null)
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Storage picker not supported or error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = "Save to Custom SD Card/Memory",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Choose manual folder from internal/external memory",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Current Save Directory:",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(
+                                    text = displayPath,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = { showDownloadPathDialog = false }) {
+                        Text("OK")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        try {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val clip = android.content.ClipData.newPlainText("Download Path", displayPath)
+                            clipboard.setPrimaryClip(clip)
+                            Toast.makeText(context, "Path copied to clipboard!", Toast.LENGTH_SHORT).show()
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }) {
+                        Text("Copy Path")
+                    }
+                }
+            )
+        }
+
+        if (showBatteryOptimizationDialog) {
+            val pm = remember { context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager }
+            val isIgnoring = remember(context) {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                    pm?.isIgnoringBatteryOptimizations(context.packageName) ?: false
+                } else {
+                    true
+                }
+            }
+            var performanceModeActive by remember {
+                mutableStateOf(sharedPrefs.getBoolean("download_performance_mode", true))
+            }
+            
+            AlertDialog(
+                onDismissRequest = { showBatteryOptimizationDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.BatteryChargingFull,
+                            contentDescription = "Battery optimization icon",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Battery & Performance",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column {
+                        Text(
+                            text = "Disable battery optimization to maintain fast background downloads and prevent sudden download interruption by the Android system.",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    color = if (isIgnoring) Color(0xFFE8F5E9) else Color(0xFFFFF3E0),
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (isIgnoring) Icons.Default.CheckCircle else Icons.Default.Warning,
+                                contentDescription = "Status icon",
+                                tint = if (isIgnoring) Color(0xFF4CAF50) else Color(0xFFFF9800),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (isIgnoring) "Optimization Ignored (Ideal)" else "Optimization Active (Downloads might stop)",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isIgnoring) Color(0xFF2E7D32) else Color(0xFFE65100)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Performance mode options
+                        Text(
+                            text = "Background Download Optimization:",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    performanceModeActive = !performanceModeActive
+                                    sharedPrefs.edit().putBoolean("download_performance_mode", performanceModeActive).apply()
+                                    Toast.makeText(context, if (performanceModeActive) "Performance Mode Enabled!" else "Balanced Energy Mode Activated!", Toast.LENGTH_SHORT).show()
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = performanceModeActive,
+                                onCheckedChange = {
+                                    performanceModeActive = it
+                                    sharedPrefs.edit().putBoolean("download_performance_mode", it).apply()
+                                    Toast.makeText(context, if (it) "Performance Mode Enabled!" else "Balanced Energy Mode Activated!", Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = "Download Performance Mode",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Keeps CPU awake during downloads for speed preservation",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        showBatteryOptimizationDialog = false
+                        try {
+                            val intent = android.content.Intent().apply {
+                                action = android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+                            }
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            try {
+                                val intent = android.content.Intent().apply {
+                                    action = android.provider.Settings.ACTION_SETTINGS
+                                }
+                                context.startActivity(intent)
+                            } catch (ex: Exception) {
+                                Toast.makeText(context, "Could not open settings", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }) {
+                        Text("System Settings")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showBatteryOptimizationDialog = false }) {
+                        Text("Dismiss")
+                    }
+                }
+            )
+        }
+
+        if (showSortDialog) {
+            AlertDialog(
+                onDismissRequest = { showSortDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Sort,
+                            contentDescription = "Sort Icon",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Sort Downloads",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Choose how to arrange your downloaded files:",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        
+                        val sortOptions = listOf(
+                            "date_desc" to "Date Added (Newest First)",
+                            "date_asc" to "Date Added (Oldest First)",
+                            "size_desc" to "File Size (Largest First)",
+                            "size_asc" to "File Size (Smallest First)",
+                            "name_asc" to "Alphabetical (A - Z)",
+                            "name_desc" to "Alphabetical (Z - A)"
+                        )
+                        
+                        sortOptions.forEach { (optionKey, optionLabel) ->
+                            val isSelected = (currentSortBy == optionKey)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        currentSortBy = optionKey
+                                        sharedPrefs.edit().putString("download_sort_by", optionKey).apply()
+                                        showSortDialog = false
+                                        Toast.makeText(context, "Sorted by $optionLabel", Toast.LENGTH_SHORT).show()
+                                    }
+                                    .padding(vertical = 10.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = isSelected,
+                                    onClick = {
+                                        currentSortBy = optionKey
+                                        sharedPrefs.edit().putString("download_sort_by", optionKey).apply()
+                                        showSortDialog = false
+                                        Toast.makeText(context, "Sorted by $optionLabel", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text(
+                                    text = optionLabel,
+                                    fontSize = 15.sp,
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showSortDialog = false }) {
+                        Text("Dismiss")
+                    }
+                }
+            )
+        }
+
+        if (showAppInfoDialog) {
+            AlertDialog(
+                onDismissRequest = { showAppInfoDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "About icon",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Download Manager Info",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 280.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        item {
+                            Text(
+                                text = "About Us",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "Able Drama Download Manager is a fully integrated premium downloader optimized for speed and resilience, designed to keep track of stream media files locally in pristine offline quality.",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        item {
+                            Text(
+                                text = "Version Info",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "Version: 2.5.5 - Pro Stable Build",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        item {
+                            Text(
+                                text = "Privacy Policy",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "Your privacy is paramount. Download states, file urls, and storage caches are processed locally on your physical android device and never transferred out externally.",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        item {
+                            Text(
+                                text = "Terms of Service",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "By initiating file download pipelines, the user acknowledges full proprietary or fair-use possession over copyrighted media under localized streaming rules.",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = { showAppInfoDialog = false }) {
+                        Text("Dismiss")
+                    }
+                }
+            )
+        }
+
+        if (showDownloadStatsDialog) {
+            val totalBytes = remember(allDownloads) { allDownloads.sumOf { it.bytesDownloaded } }
+            val completedTasks = remember(allDownloads) { allDownloads.count { it.status == "FINISHED" } }
+            val downloadingTasks = remember(allDownloads) { allDownloads.count { it.status == "DOWNLOADING" } }
+            val failedTasks = remember(allDownloads) { allDownloads.count { it.status == "ERROR" } }
+            val pausedTasks = remember(allDownloads) { allDownloads.count { it.status == "PAUSED" } }
+
+            val df = remember { DecimalFormat("#.##") }
+            val formattedSize = remember(totalBytes) {
+                if (totalBytes < 1024L) {
+                    "$totalBytes B"
+                } else if (totalBytes < 1024L * 1024L) {
+                    "${df.format(totalBytes.toDouble() / 1024.0)} KB"
+                } else if (totalBytes < 1024L * 1024L * 1024L) {
+                    "${df.format(totalBytes.toDouble() / (1024.0 * 1024.0))} MB"
+                } else {
+                    "${df.format(totalBytes.toDouble() / (1024.0 * 1024.0 * 1024.0))} GB"
+                }
+            }
+
+            AlertDialog(
+                onDismissRequest = { showDownloadStatsDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.BarChart,
+                            contentDescription = "Stats icon",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Download Statistics",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "Summary of Download Statistics:",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Total download tasks added:", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("${allDownloads.size}", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Completed downloads:", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("$completedTasks", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+                        }
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Active downloading:", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("$downloadingTasks", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        }
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Failed downloads count:", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("$failedTasks", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFFC62828))
+                        }
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Paused tasks count:", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("$pausedTasks", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFFEF6C00))
+                        }
+                        
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.3f))
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Total physical size:", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                                Text(formattedSize, fontSize = 15.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = { showDownloadStatsDialog = false }) {
+                        Text("OK")
+                    }
+                }
+            )
+        }
+
     }
 }
 
@@ -643,6 +1741,11 @@ fun DownloadItemRow(
 ) {
     val context = LocalContext.current
     val df = remember { DecimalFormat("#.##") }
+    
+    val animatedProgress by animateFloatAsState(
+        targetValue = item.progress / 100f,
+        label = "smoothProgress"
+    )
     
     Card(
         modifier = Modifier
@@ -714,7 +1817,7 @@ fun DownloadItemRow(
 
                 // Linear progress indicator
                 LinearProgressIndicator(
-                    progress = { item.progress / 100f },
+                    progress = { animatedProgress },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(5.dp)
@@ -731,19 +1834,44 @@ fun DownloadItemRow(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val speedAndEta = when (item.status) {
-                        "DOWNLOADING" -> "${item.downloadSpeed}   ETA: ${item.eta}"
-                        "FINISHED" -> "Completed"
-                        "PAUSED" -> "Paused"
-                        "ERROR" -> "Failed: ${item.eta}"
-                        else -> "Queued"
+                    if (item.status == "DOWNLOADING") {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ArrowDownward,
+                                contentDescription = "Download speed",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Text(
+                                text = item.downloadSpeed,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Text(
+                            text = "ETA: ${item.eta}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                    } else {
+                        val statusLabel = when (item.status) {
+                            "FINISHED" -> "Completed"
+                            "PAUSED" -> "Paused"
+                            "ERROR" -> "Failed: ${item.eta}"
+                            else -> "Queued"
+                        }
+                        Text(
+                            text = statusLabel,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (item.status == "FINISHED") Color(0xFF4CAF50) else if (item.status == "ERROR") Color(0xFFF44336) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
                     }
-                    Text(
-                        text = speedAndEta,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = if (item.status == "FINISHED") Color(0xFF4CAF50) else if (item.status == "ERROR") Color(0xFFF44336) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
                 }
             }
 

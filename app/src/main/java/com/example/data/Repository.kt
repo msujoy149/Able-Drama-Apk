@@ -31,7 +31,7 @@ class BrowserRepository(private val dao: BrowserDao) {
         return if (isBrowser) dao.isBrowserBookmarkedDirect(url) else dao.isBookmarkedDirect(url)
     }
 
-    suspend fun addHistory(url: String, title: String, isBrowser: Boolean = false) {
+    suspend fun addHistory(url: String, title: String, isBrowser: Boolean = false, thumbnailUrl: String? = null) {
         if (url.startsWith("http")) {
             val trimmedUrl = url.trim()
             if (trimmedUrl.isNotBlank()) {
@@ -40,7 +40,7 @@ class BrowserRepository(private val dao: BrowserDao) {
                 } else {
                     dao.deleteHistoryByUrl(trimmedUrl)
                 }
-                dao.insertHistory(HistoryItem(url = trimmedUrl, title = title, isBrowser = isBrowser))
+                dao.insertHistory(HistoryItem(url = trimmedUrl, title = title, isBrowser = isBrowser, thumbnailUrl = thumbnailUrl))
             }
         }
     }
