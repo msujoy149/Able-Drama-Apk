@@ -13,7 +13,7 @@ val Pink40 = Color(0xFF7D5260)
 // Premium Cinema Theme Colors
 val CinemaRed = Color(0xFFD0BCFF) // Luminous Lilac primary
 val CinemaGold = Color(0xFFFFB300) // Vibrant Gold accent
-val DarkVacuum = Color(0xFF141218) // Deep Dark Violet/Grey background
-val SurfaceSlate = Color(0xFF1D1B20) // Deep Slate Surface
-val OnSurfaceLight = Color(0xFFE6E1E5) // Light grey text
-val BorderGrey = Color(0xFF49454F) // Border color
+val DarkVacuum = Color(0xFF08080A) // Pitch-Black premium background
+val SurfaceSlate = Color(0xFF121217) // Deep Dark Slate surface
+val OnSurfaceLight = Color(0xFFFFFFFF) // Maximum white readable text
+val BorderGrey = Color(0xFF262633) // Premium subtle border color

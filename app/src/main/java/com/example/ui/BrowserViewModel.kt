@@ -33,6 +33,13 @@ sealed interface WebViewCommand {
 
 class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() {
 
+    private val _isDarkTheme = MutableStateFlow(true)
+    val isDarkTheme: StateFlow<Boolean> = _isDarkTheme.asStateFlow()
+
+    fun setDarkTheme(isDark: Boolean) {
+        _isDarkTheme.value = isDark
+    }
+
     companion object {
         const val PRIMARY_URL = "https://www.abledrama.top"
         const val SECONDARY_URL = "https://www.abledrama.top"
@@ -217,6 +224,7 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
         if (u.contains("search/label/short") || u.contains("category/short")) return true
         if (u.contains("search/label/web") || u.contains("category/web")) return true
         if (u.contains("search/label/ongoin")) return true
+        if (u.endsWith("/search") || u.endsWith("/search/") || u.contains("abledrama.top/search?") || u.contains("ablesrama.top/search?")) return true
         if (u.contains("/p/")) return true
         
         // Post pages
@@ -235,6 +243,7 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
             u.contains("search/label/short") || u.contains("category/short") -> "Short Drama Portal"
             u.contains("search/label/web") || u.contains("category/web") -> "Web Series Portal"
             u.contains("search/label/ongoin") -> "Ongoing Uploads Portal"
+            u.endsWith("/search") || u.endsWith("/search/") || u.contains("abledrama.top/search?") || u.contains("ablesrama.top/search?") -> "Recent Uploads Portal"
             u.contains("/p/how-to-download.html") -> "How to Download Guide"
             u.contains("/p/request-file-form.html") -> "Request Movie/Drama Form"
             u.contains("/p/dmca-remove-your-file.html") -> "DMCA Takedown Form"
@@ -415,7 +424,11 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
             } catch (e: Exception) {
                 trimmed
             }
-            return "https://www.google.com/search?q=$encodedQuery"
+            return if (_isDarkTheme.value) {
+                "https://www.google.com/search?q=$encodedQuery&cs=1"
+            } else {
+                "https://www.google.com/search?q=$encodedQuery&cs=0"
+            }
         }
 
         // Check if matches standard WEB_URL pattern OR lighter check for standard domains like abledrama.com
@@ -440,7 +453,11 @@ class BrowserViewModel(private val repository: BrowserRepository) : ViewModel() 
         } catch (e: Exception) {
             trimmed
         }
-        return "https://www.google.com/search?q=$encodedQuery"
+        return if (_isDarkTheme.value) {
+            "https://www.google.com/search?q=$encodedQuery&cs=1"
+        } else {
+            "https://www.google.com/search?q=$encodedQuery&cs=0"
+        }
     }
 }
 

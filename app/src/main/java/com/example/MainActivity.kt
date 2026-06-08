@@ -122,70 +122,65 @@ class MainActivity : ComponentActivity() {
 
     private val clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
         handler.removeCallbacks(checkClipboardRunnable)
-        handler.postDelayed(checkClipboardRunnable, 150)
+        handler.postDelayed(checkClipboardRunnable, 80)
     }
 
     private fun checkClipboardAndRedirect() {
         if (!isActivityResumed || !hasWindowFocus()) return
         if (!isAbleDramaActive) return
         
-        lifecycleScope.launch(Dispatchers.Default) {
-            try {
-                val clipboard = withContext(Dispatchers.Main) {
-                    getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                } ?: return@launch
-                
-                val clipData = withContext(Dispatchers.Main) {
-                    try {
-                        if (clipboard.hasPrimaryClip()) {
-                            clipboard.primaryClip
-                        } else {
-                            null
-                        }
-                    } catch (t: Throwable) {
-                        android.util.Log.e("ClipboardSafe", "Failed to get primaryClip safely", t)
-                        null
-                    }
+        try {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+            if (!clipboard.hasPrimaryClip()) {
+                isInitialCaptureDone = true
+                return
+            }
+            val clipData = try {
+                clipboard.primaryClip
+            } catch (t: Throwable) {
+                null
+            } ?: run {
+                isInitialCaptureDone = true
+                return
+            }
+            
+            if (clipData.itemCount > 0) {
+                val firstItem = try {
+                    clipData.getItemAt(0)
+                } catch (t: Throwable) {
+                    null
                 }
-                
-                if (clipData != null && clipData.itemCount > 0) {
-                    val firstItem = try {
-                        clipData.getItemAt(0)
-                    } catch (t: Throwable) {
-                        null
-                    }
-                    val copiedText = firstItem?.text?.toString()?.trim()
-                    if (!copiedText.isNullOrEmpty()) {
-                        val urlCandidate = extractUrl(copiedText)
-                        if (urlCandidate != null) {
-                            if (!isInitialCaptureDone) {
-                                // First successful clipboard access: quietly capture pre-existing text so we do not redirect
-                                lastProcessedClipText = urlCandidate
-                                isInitialCaptureDone = true
-                                android.util.Log.d("ClipboardRedirection", "Initial clipboard captured: $urlCandidate (No redirect)")
-                                return@launch
-                            }
-                            if (urlCandidate != lastProcessedClipText) {
-                                lastProcessedClipText = urlCandidate
-                                android.util.Log.d("ClipboardRedirection", "Redirecting internally to URL: $urlCandidate")
-                                withContext(Dispatchers.Main) {
-                                    Toast.makeText(this@MainActivity, "Opening copied link...", Toast.LENGTH_SHORT).show()
-                                    browserViewModel?.loadUrl(urlCandidate)
-                                    browserViewModel?.triggerOpenBrowser()
-                                }
-                            }
-                        } else {
+                val copiedText = firstItem?.text?.toString()?.trim()
+                if (!copiedText.isNullOrEmpty()) {
+                    val urlCandidate = extractUrl(copiedText)
+                    if (urlCandidate != null) {
+                        if (!isInitialCaptureDone) {
+                            // First successful clipboard access: quietly capture pre-existing text so we do not redirect
+                            lastProcessedClipText = urlCandidate
                             isInitialCaptureDone = true
+                            android.util.Log.d("ClipboardRedirection", "Initial clipboard captured: $urlCandidate (No redirect)")
+                            return
+                        }
+                        if (urlCandidate != lastProcessedClipText) {
+                            lastProcessedClipText = urlCandidate
+                            android.util.Log.d("ClipboardRedirection", "Redirecting internally to URL: $urlCandidate")
+                            Toast.makeText(this@MainActivity, "Opening copied link...", Toast.LENGTH_SHORT).show()
+                            browserViewModel?.loadUrl(urlCandidate)
+                            browserViewModel?.triggerOpenBrowser()
                         }
                     } else {
+                        // Plain text should NOT cause redirect, and we don't interfere with the isInitialCaptureDone flag.
+                        // Setting isInitialCaptureDone = true ensures from here on, any valid URL will trigger redirect.
                         isInitialCaptureDone = true
                     }
                 } else {
                     isInitialCaptureDone = true
                 }
-            } catch (t: Throwable) {
-                android.util.Log.e("ClipboardSafe", "Exception in clipboard check redirection", t)
+            } else {
+                isInitialCaptureDone = true
             }
+        } catch (t: Throwable) {
+            android.util.Log.e("ClipboardSafe", "Exception in clipboard check redirection", t)
         }
     }
 
@@ -236,6 +231,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         isActivityResumed = true
+        isInitialCaptureDone = false
         try {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             clipboard?.addPrimaryClipChangedListener(clipboardListener)
@@ -259,8 +255,9 @@ class MainActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
+            isInitialCaptureDone = false
             handler.removeCallbacks(checkClipboardRunnable)
-            handler.postDelayed(checkClipboardRunnable, 300)
+            handler.postDelayed(checkClipboardRunnable, 100)
         }
     }
 
@@ -289,6 +286,10 @@ class MainActivity : ComponentActivity() {
             val prefs = remember { context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE) }
             var isDarkTheme by remember {
                 mutableStateOf(prefs.getBoolean("is_dark_theme", true))
+            }
+
+            LaunchedEffect(isDarkTheme) {
+                browserViewModel?.setDarkTheme(isDarkTheme)
             }
 
             MyApplicationTheme(darkTheme = isDarkTheme) {
@@ -701,26 +702,29 @@ fun MainAppContent(
                                     val isThisTabVisible = currentTab == AppTab.BROWSER && selectedTabId == tab.id
                                     androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
                                         if (tab.url == "browser://home" || tab.url.isBlank()) {
-                                            BrowserHomepage(
-                                                viewModel = viewModel,
-                                                tabId = tab.id,
-                                                isDarkTheme = isDarkTheme,
-                                                onUrlFocusTrigger = {
-                                                    viewModel.triggerSearchFocus(true)
-                                                },
-                                                onHistoryClick = {
-                                                    showBrowserHistoryDialog = true
-                                                },
-                                                onDownloadsClick = {
-                                                    showDownloadManagerDialog = true
-                                                },
-                                                modifier = Modifier.fillMaxSize()
-                                            )
+                                            if (isThisTabVisible) {
+                                                BrowserHomepage(
+                                                    viewModel = viewModel,
+                                                    tabId = tab.id,
+                                                    isDarkTheme = isDarkTheme,
+                                                    onUrlFocusTrigger = {
+                                                        viewModel.triggerSearchFocus(true)
+                                                    },
+                                                    onHistoryClick = {
+                                                        showBrowserHistoryDialog = true
+                                                    },
+                                                    onDownloadsClick = {
+                                                        showDownloadManagerDialog = true
+                                                    },
+                                                    modifier = Modifier.fillMaxSize()
+                                                )
+                                            }
                                         } else {
                                             AdvancedWebView(
                                                 viewModel = viewModel,
                                                 tabId = tab.id,
                                                 isVisible = isThisTabVisible,
+                                                isDarkTheme = isDarkTheme,
                                                 onShowCustomView = onShowCustomView,
                                                 onHideCustomView = onHideCustomView,
                                                 modifier = Modifier.fillMaxSize().testTag("movie_web_view_${tab.id}"),
@@ -864,6 +868,7 @@ fun MainAppContent(
             BrowserHistoryBookmarksDialog(
                 browserBookmarks = browserBookmarks,
                 browserHistory = browserHistory,
+                isDarkTheme = isDarkTheme,
                 onDismissRequest = { showBrowserHistoryDialog = false },
                 onUrlClick = { url ->
                     showBrowserHistoryDialog = false
@@ -998,6 +1003,7 @@ fun MainAppContent(
             TabGridOverlay(
                 tabs = tabsList,
                 selectedTabId = selectedTabId,
+                isDarkTheme = isDarkTheme,
                 onTabSelect = { tabId ->
                     viewModel.selectTab(tabId)
                     isTabGridVisible = false
@@ -1187,7 +1193,7 @@ fun BrowserToolbar(
                 lowercaseUrl.contains("wikipedia.org") -> if (isDarkTheme) Color(0xFF1E1E1E) else Color(0xFFF6F6F6)
                 lowercaseUrl.contains("github.com") -> Color(0xFF1F2328)
                 else -> {
-                    if (isDarkTheme) Color(0xFF1F1F1E) else Color.White
+                    if (isDarkTheme) Color(0xFF08080A) else Color.White
                 }
             }
         }
@@ -1485,13 +1491,21 @@ fun BrowserToolbar(
 fun TabGridOverlay(
     tabs: List<BrowserTab>,
     selectedTabId: String,
+    isDarkTheme: Boolean,
     onTabSelect: (String) -> Unit,
     onTabClose: (String) -> Unit,
     onNewTab: () -> Unit,
     onCloseGrid: () -> Unit
 ) {
+    val backdropColor = if (isDarkTheme) Color(0xFF08080A) else Color(0xFFFAFAFC)
+    val textColor = if (isDarkTheme) Color.White else Color(0xFF131317)
+    val cardActiveBorder = if (isDarkTheme) CinemaGold else CinemaRed
+    val cardBorder = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
+    val metadataBg = if (isDarkTheme) Color(0xFF121217) else Color.White
+    val subTextColor = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368)
+
     Surface(
-        color = Color(0xFF0F0E13), // Elegant deep dark slate browser backdrop
+        color = backdropColor,
         modifier = Modifier.fillMaxSize().testTag("tab_grid_overlay")
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -1506,7 +1520,7 @@ fun TabGridOverlay(
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                         contentDescription = "Back to Browser",
-                        tint = Color.White
+                        tint = textColor
                     )
                 }
 
@@ -1514,7 +1528,7 @@ fun TabGridOverlay(
 
                 Text(
                     text = "Tabs",
-                    color = Color.White,
+                    color = textColor,
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f)
@@ -1523,7 +1537,7 @@ fun TabGridOverlay(
                 // Plus action on tab management header
                 TextButton(
                     onClick = onNewTab,
-                    colors = ButtonDefaults.textButtonColors(contentColor = CinemaGold)
+                    colors = ButtonDefaults.textButtonColors(contentColor = if (isDarkTheme) CinemaGold else CinemaRed)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Add,
@@ -1535,7 +1549,7 @@ fun TabGridOverlay(
                 }
             }
 
-            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+            HorizontalDivider(color = if (isDarkTheme) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f))
 
             if (tabs.isEmpty()) {
                 Box(
@@ -1552,8 +1566,10 @@ fun TabGridOverlay(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.weight(1f)
                 ) {
-                    gridItems(tabs) { tab ->
+                    gridItems(tabs, key = { it.id }) { tab ->
                         val isActive = tab.id == selectedTabId
+                        val activeContainerColor = if (isDarkTheme) Color(0xFF121217) else Color.White
+                        val inactiveContainerColor = if (isDarkTheme) Color(0xFF08080A) else Color(0xFFF1F3F4)
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1562,10 +1578,10 @@ fun TabGridOverlay(
                             shape = RoundedCornerShape(12.dp),
                             border = BorderStroke(
                                 width = if (isActive) 1.8.dp else 1.dp,
-                                color = if (isActive) CinemaGold else Color.White.copy(alpha = 0.1f)
+                                color = if (isActive) cardActiveBorder else cardBorder
                             ),
                             colors = CardDefaults.cardColors(
-                                containerColor = if (isActive) Color(0xFF1B1A22) else Color(0xFF131217)
+                                containerColor = if (isActive) activeContainerColor else inactiveContainerColor
                             )
                         ) {
                             Column(modifier = Modifier.fillMaxSize()) {
@@ -1574,7 +1590,7 @@ fun TabGridOverlay(
                                     modifier = Modifier
                                         .weight(1f)
                                         .fillMaxWidth()
-                                        .background(Color(0xFF1E1D24))
+                                        .background(if (isDarkTheme) Color(0xFF131318) else Color(0xFFFAFAFC))
                                 ) {
                                     if (tab.screenshot != null) {
                                         Image(
@@ -1591,10 +1607,11 @@ fun TabGridOverlay(
                                                 .fillMaxSize()
                                                 .background(
                                                     Brush.verticalGradient(
-                                                        colors = listOf(
-                                                            Color(0xFF2C133B),
-                                                            Color(0xFF110A1C)
-                                                        )
+                                                        colors = if (isDarkTheme) {
+                                                            listOf(Color(0xFF2C133B), Color(0xFF110A1C))
+                                                        } else {
+                                                            listOf(Color(0xFFFFECF0), Color(0xFFEAEFFB))
+                                                        }
                                                     )
                                                 ),
                                             contentAlignment = Alignment.Center
@@ -1602,7 +1619,7 @@ fun TabGridOverlay(
                                             Box(
                                                 modifier = Modifier
                                                     .size(34.dp)
-                                                    .background(Color.White.copy(alpha = 0.08f), CircleShape),
+                                                    .background(if (isDarkTheme) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.05f), CircleShape),
                                                 contentAlignment = Alignment.Center
                                             ) {
                                                 val domainInitial = try {
@@ -1615,7 +1632,7 @@ fun TabGridOverlay(
                                                 }
                                                 Text(
                                                     text = domainInitial,
-                                                    color = CinemaGold,
+                                                    color = if (isDarkTheme) CinemaGold else CinemaRed,
                                                     fontSize = 15.sp,
                                                     fontWeight = FontWeight.Bold
                                                 )
@@ -1635,14 +1652,14 @@ fun TabGridOverlay(
                                             Box(
                                                 modifier = Modifier
                                                     .background(
-                                                        color = CinemaGold,
+                                                        color = if (isDarkTheme) CinemaGold else CinemaRed,
                                                         shape = RoundedCornerShape(4.dp)
                                                     )
                                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                                             ) {
                                                 Text(
                                                     text = "ACTIVE",
-                                                    color = Color.Black,
+                                                    color = if (isDarkTheme) Color.Black else Color.White,
                                                     fontSize = 8.sp,
                                                     fontWeight = FontWeight.Bold
                                                 )
@@ -1672,12 +1689,12 @@ fun TabGridOverlay(
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .background(Color(0xFF17161D))
+                                        .background(metadataBg)
                                         .padding(8.dp)
                                 ) {
                                     Text(
                                         text = tab.title.ifBlank { "Untitled" },
-                                        color = Color.White,
+                                        color = textColor,
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
                                         maxLines = 1,
@@ -1694,7 +1711,7 @@ fun TabGridOverlay(
                                     }
                                     Text(
                                         text = shortDomain,
-                                        color = Color.White.copy(alpha = 0.55f),
+                                        color = subTextColor,
                                         fontSize = 9.sp,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
@@ -2375,8 +2392,15 @@ fun MyAccountTab(
             )
         }
 
-        // Beautiful 5 Lists
+        // Beautiful 6 Lists
         val accountSections = listOf(
+            AccountSectionItem(
+                titleBengali = "সাম্প্রতিক আপলোডসমূহ",
+                titleEnglish = "Recent Uploads",
+                url = "https://www.abledrama.top/search",
+                icon = Icons.Default.NewReleases,
+                badgeText = "NEW"
+            ),
             AccountSectionItem(
                 titleBengali = "চলমান আপলোডসমূহ",
                 titleEnglish = "Ongoing Uploads",
@@ -2414,7 +2438,7 @@ fun MyAccountTab(
             )
         )
 
-        items(accountSections) { sec ->
+        items(accountSections, key = { it.titleEnglish }) { sec ->
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -3582,12 +3606,14 @@ fun CategorySelectionRow(
     currentUrl: String,
     onCategorySelected: (String) -> Unit
 ) {
-    val categories = listOf(
-        CategoryItem("K-Drama", "k-drama", "https://www.abledrama.top/category/k-drama"),
-        CategoryItem("Bengali", "bengali", "https://www.abledrama.top/category/bengali"),
-        CategoryItem("Web Series", "web series", "https://www.abledrama.top/category/web-series"),
-        CategoryItem("Movies", "movies", "https://www.abledrama.top/category/movies")
-    )
+    val categories = remember {
+        listOf(
+            CategoryItem("K-Drama", "k-drama", "https://www.abledrama.top/category/k-drama"),
+            CategoryItem("Bengali", "bengali", "https://www.abledrama.top/category/bengali"),
+            CategoryItem("Web Series", "web series", "https://www.abledrama.top/category/web-series"),
+            CategoryItem("Movies", "movies", "https://www.abledrama.top/category/movies")
+        )
+    }
 
     Row(
         modifier = Modifier
@@ -3696,7 +3722,7 @@ fun SplashScreen(isDarkTheme: Boolean) {
             Spacer(modifier = Modifier.height(8.dp))
             
             Text(
-                text = "Ad-free Safe Streaming",
+                text = "Your Ultimate Entertainment",
                 color = if (isDarkTheme) Color.LightGray else Color.DarkGray,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium
@@ -3775,9 +3801,9 @@ fun BrowserActionMenuPopup(
                     .padding(top = 52.dp, end = 12.dp)
                     .clickable(enabled = false, onClick = {}),
                 shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = if (isDarkTheme) Color(0xFF1E1B24) else Color.White),
+                colors = CardDefaults.cardColors(containerColor = if (isDarkTheme) Color(0xFF121217) else Color.White),
                 elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                border = BorderStroke(0.5.dp, if (isDarkTheme) Color(0xFF32303A) else Color(0xFFE0E0E0))
+                border = BorderStroke(0.5.dp, if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFE0E0E0))
             ) {
                 Column(
                     modifier = Modifier
@@ -3792,7 +3818,7 @@ fun BrowserActionMenuPopup(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val iconBg = if (isDarkTheme) Color(0xFF2B2835) else Color(0xFFF1F3F4)
+                        val iconBg = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFF1F3F4)
                         val iconTint = if (isDarkTheme) Color.White else Color(0xFF202124)
                         val iconDisabledTint = if (isDarkTheme) Color(0xFF49454F) else Color(0xFFC4C7C5)
 
@@ -3897,7 +3923,7 @@ fun BrowserActionMenuPopup(
                         }
                     }
 
-                    val dividerColor = if (isDarkTheme) Color(0xFF32303A) else Color(0xFFE0E0E0)
+                    val dividerColor = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
                     HorizontalDivider(color = dividerColor, thickness = 0.5.dp, modifier = Modifier.padding(vertical = 4.dp))
 
                     // Menu List Items
@@ -4013,6 +4039,7 @@ fun BrowserActionMenuPopup(
 fun BrowserHistoryBookmarksDialog(
     browserBookmarks: List<Bookmark>,
     browserHistory: List<HistoryItem>,
+    isDarkTheme: Boolean,
     onDismissRequest: () -> Unit,
     onUrlClick: (String) -> Unit,
     onDeleteBookmark: (String) -> Unit,
@@ -4022,6 +4049,19 @@ fun BrowserHistoryBookmarksDialog(
     var subTabState by remember { mutableStateOf(0) } // 0 = Bookmarks, 1 = History
     var searchQuery by remember { mutableStateOf("") }
 
+    val bgColor = if (isDarkTheme) Color(0xFF08080A) else Color(0xFFFAFAFC)
+    val headerTextColor = if (isDarkTheme) Color.White else Color(0xFF131317)
+    val closeBtnBg = if (isDarkTheme) Color(0xFF121217) else Color(0xFFF1F3F4)
+    val closeBtnTint = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368)
+    val tabsBg = if (isDarkTheme) Color(0xFF121217) else Color(0xFFF1F3F4)
+    val tabActiveBg = if (isDarkTheme) Color(0xFF1F1F24) else Color.White
+    val tabActiveText = if (isDarkTheme) CinemaGold else Color(0xFF1A73E8)
+    val tabInactiveText = if (isDarkTheme) Color.Gray else Color(0xFF5F6368)
+    val itemCardBg = if (isDarkTheme) Color(0xFF121217) else Color.White
+    val itemBorderColor = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
+    val titleTextColor = if (isDarkTheme) Color.White else Color(0xFF131317)
+    val subtitleTextColor = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368)
+
     Dialog(
         onDismissRequest = onDismissRequest,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -4029,7 +4069,7 @@ fun BrowserHistoryBookmarksDialog(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.White)
+                .background(bgColor)
         ) {
             // Header Row
             Row(
@@ -4041,19 +4081,19 @@ fun BrowserHistoryBookmarksDialog(
             ) {
                 Text(
                     text = if (subTabState == 0) "Browser Bookmarks" else "Browser History",
-                    color = Color(0xFF202124),
+                    color = headerTextColor,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold
                 )
 
                 IconButton(
                     onClick = onDismissRequest,
-                    modifier = Modifier.background(Color(0xFFF1F3F4), CircleShape)
+                    modifier = Modifier.background(closeBtnBg, CircleShape)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Close",
-                        tint = Color(0xFF5F6368)
+                        tint = closeBtnTint
                     )
                 }
             }
@@ -4064,15 +4104,15 @@ fun BrowserHistoryBookmarksDialog(
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFFF1F3F4))
+                    .background(tabsBg)
                     .padding(4.dp)
             ) {
                 Button(
                     onClick = { subTabState = 0 },
                     modifier = Modifier.weight(1f).testTag("browser_sub_tab_bookmarks"),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (subTabState == 0) Color.White else Color.Transparent,
-                        contentColor = if (subTabState == 0) Color(0xFF1A73E8) else Color(0xFF5F6368)
+                        containerColor = if (subTabState == 0) tabActiveBg else Color.Transparent,
+                        contentColor = if (subTabState == 0) tabActiveText else tabInactiveText
                     ),
                     shape = RoundedCornerShape(10.dp),
                     elevation = if (subTabState == 0) ButtonDefaults.buttonElevation(defaultElevation = 2.dp) else null
@@ -4090,8 +4130,8 @@ fun BrowserHistoryBookmarksDialog(
                     onClick = { subTabState = 1 },
                     modifier = Modifier.weight(1f).testTag("browser_sub_tab_history"),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (subTabState == 1) Color.White else Color.Transparent,
-                        contentColor = if (subTabState == 1) Color(0xFF1A73E8) else Color(0xFF5F6368)
+                        containerColor = if (subTabState == 1) tabActiveBg else Color.Transparent,
+                        contentColor = if (subTabState == 1) tabActiveText else tabInactiveText
                     ),
                     shape = RoundedCornerShape(10.dp),
                     elevation = if (subTabState == 1) ButtonDefaults.buttonElevation(defaultElevation = 2.dp) else null
@@ -4116,21 +4156,21 @@ fun BrowserHistoryBookmarksDialog(
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp)
                     .testTag("browser_search_input"),
-                placeholder = { Text("Search title or URL...", color = Color(0xFF5F6368)) },
+                placeholder = { Text("Search title or URL...", color = subtitleTextColor) },
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color(0xFF202124),
-                    unfocusedTextColor = Color(0xFF202124),
-                    focusedBorderColor = Color(0xFF1A73E8),
-                    unfocusedBorderColor = Color(0xFFE0E0E0),
-                    focusedContainerColor = Color(0xFFF1F3F4),
-                    unfocusedContainerColor = Color(0xFFF1F3F4)
+                    focusedTextColor = titleTextColor,
+                    unfocusedTextColor = titleTextColor,
+                    focusedBorderColor = if (isDarkTheme) CinemaGold else Color(0xFF1A73E8),
+                    unfocusedBorderColor = if (isDarkTheme) Color(0xFF262633) else Color(0xFFE0E0E0),
+                    focusedContainerColor = tabsBg,
+                    unfocusedContainerColor = tabsBg
                 ),
                 shape = RoundedCornerShape(12.dp),
                 maxLines = 1,
                 trailingIcon = {
                     if (searchQuery.isNotEmpty()) {
                         IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Default.Close, contentDescription = "Clear", tint = Color(0xFF5F6368))
+                            Icon(Icons.Default.Close, contentDescription = "Clear", tint = closeBtnTint)
                         }
                     }
                 }
@@ -4150,7 +4190,7 @@ fun BrowserHistoryBookmarksDialog(
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Icon(Icons.Outlined.BookmarkBorder, contentDescription = null, tint = Color.LightGray, modifier = Modifier.size(54.dp))
                             Spacer(modifier = Modifier.height(10.dp))
-                            Text(text = "No saved bookmarks in browser", color = Color(0xFF5F6368), fontSize = 14.sp)
+                            Text(text = "No saved bookmarks in browser", color = subtitleTextColor, fontSize = 14.sp)
                         }
                     }
                 } else {
@@ -4165,8 +4205,8 @@ fun BrowserHistoryBookmarksDialog(
                                     .fillMaxWidth()
                                     .padding(vertical = 4.dp)
                                     .clickable { onUrlClick(item.url) },
-                                colors = CardDefaults.cardColors(containerColor = Color.White),
-                                border = BorderStroke(0.5.dp, Color(0xFFE0E0E0)),
+                                colors = CardDefaults.cardColors(containerColor = itemCardBg),
+                                border = BorderStroke(0.5.dp, itemBorderColor),
                                 shape = RoundedCornerShape(12.dp)
                             ) {
                                 Row(
@@ -4177,9 +4217,9 @@ fun BrowserHistoryBookmarksDialog(
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(text = item.title, color = Color(0xFF202124), fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(text = item.title, color = titleTextColor, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         Spacer(modifier = Modifier.height(3.dp))
-                                        Text(text = item.url, color = Color(0xFF5F6368), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(text = item.url, color = subtitleTextColor, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     }
                                     IconButton(onClick = { onDeleteBookmark(item.url) }) {
                                         Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFD93025))
@@ -4200,14 +4240,17 @@ fun BrowserHistoryBookmarksDialog(
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Icon(imageVector = Icons.Outlined.History, contentDescription = null, tint = Color.LightGray, modifier = Modifier.size(54.dp))
                             Spacer(modifier = Modifier.height(10.dp))
-                            Text(text = "Browsing history log is empty", color = Color(0xFF5F6368), fontSize = 14.sp)
+                            Text(text = "Browsing history log is empty", color = subtitleTextColor, fontSize = 14.sp)
                         }
                     }
                 } else {
                     Column(modifier = Modifier.weight(1f)) {
                         Button(
                             onClick = onClearAllHistory,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFCE8E6), contentColor = Color(0xFFD93025)),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isDarkTheme) Color(0xFF3C1F1F) else Color(0xFFFCE8E6),
+                                contentColor = if (isDarkTheme) Color(0xFFFF8B8B) else Color(0xFFD93025)
+                            ),
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier
                                 .align(Alignment.End)
@@ -4231,8 +4274,8 @@ fun BrowserHistoryBookmarksDialog(
                                         .fillMaxWidth()
                                         .padding(vertical = 4.dp)
                                         .clickable { onUrlClick(item.url) },
-                                    colors = CardDefaults.cardColors(containerColor = Color.White),
-                                    border = BorderStroke(0.5.dp, Color(0xFFE0E0E0)),
+                                    colors = CardDefaults.cardColors(containerColor = itemCardBg),
+                                    border = BorderStroke(0.5.dp, itemBorderColor),
                                     shape = RoundedCornerShape(12.dp)
                                 ) {
                                     Row(
@@ -4243,9 +4286,9 @@ fun BrowserHistoryBookmarksDialog(
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
                                         Column(modifier = Modifier.weight(1f)) {
-                                            Text(text = item.title, color = Color(0xFF202124), fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(text = item.title, color = titleTextColor, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                             Spacer(modifier = Modifier.height(3.dp))
-                                            Text(text = item.url, color = Color(0xFF5F6368), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(text = item.url, color = subtitleTextColor, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
                                         IconButton(onClick = { onDeleteHistory(item.id) }) {
                                             Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFD93025))
@@ -4272,7 +4315,7 @@ fun BrowserHomepage(
     modifier: Modifier = Modifier
 ) {
     val isDark = isDarkTheme
-    var showSplash by rememberSaveable { mutableStateOf(true) }
+    var showSplash by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         if (showSplash) {
@@ -4285,7 +4328,7 @@ fun BrowserHomepage(
         Box(
             modifier = modifier
                 .fillMaxSize()
-                .background(if (isDark) Color(0xFF0F1219) else Color(0xFFF8F9FA)),
+                .background(if (isDark) Color(0xFF08080A) else Color(0xFFFAFAFC)),
             contentAlignment = Alignment.Center
         ) {
             Column(
@@ -4297,7 +4340,7 @@ fun BrowserHomepage(
                     modifier = Modifier
                         .size(110.dp)
                         .clip(RoundedCornerShape(28.dp))
-                        .background(if (isDark) Color(0xFF1E1B24) else Color.White)
+                        .background(if (isDark) Color(0xFF121217) else Color.White)
                         .padding(18.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -4332,7 +4375,7 @@ fun BrowserHomepage(
         Column(
             modifier = modifier
                 .fillMaxSize()
-                .background(if (isDark) Color(0xFF0F0E13) else Color(0xFFF1F3F4))
+                .background(if (isDark) Color(0xFF08080A) else Color(0xFFFAFAFC))
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
@@ -4342,7 +4385,7 @@ fun BrowserHomepage(
                 modifier = Modifier
                     .size(80.dp)
                     .clip(RoundedCornerShape(20.dp))
-                    .background(if (isDark) Color(0xFF1E1B24) else Color.White)
+                    .background(if (isDark) Color(0xFF121217) else Color.White)
                     .padding(14.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -4380,12 +4423,12 @@ fun BrowserHomepage(
                 .testTag("homepage_center_search_bar"),
             shape = RoundedCornerShape(27.dp),
             colors = CardDefaults.cardColors(
-                containerColor = if (isDark) Color(0xFF1F1F23) else Color.White
+                containerColor = if (isDark) Color(0xFF121217) else Color.White
             ),
             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
             border = BorderStroke(
                 width = 1.dp,
-                color = if (isDark) Color.White.copy(alpha = 0.1f) else Color.LightGray.copy(alpha = 0.4f)
+                color = if (isDark) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
             )
         ) {
             Row(
@@ -4451,7 +4494,7 @@ fun BrowserHomepage(
                                 } else {
                                     Modifier.background(
                                         if (item.label == "Facebook") Color(0xFF1877F2)
-                                        else if (isDark) Color(0xFF1E1B24)
+                                        else if (isDark) Color(0xFF121217)
                                         else Color.White
                                     )
                                 }
@@ -4459,7 +4502,7 @@ fun BrowserHomepage(
                             .border(
                                 width = 1.dp,
                                 color = if (item.label == "AbleDrama") Color(0xFF7F7F7F)
-                                        else if (isDark) Color.White.copy(alpha = 0.08f)
+                                        else if (isDark) Color(0xFF1F1F28)
                                         else Color.LightGray.copy(alpha = 0.3f),
                                 shape = itemShape
                             ),
@@ -4547,12 +4590,12 @@ fun BrowserHomepage(
                     .clickable { onHistoryClick() },
                 shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (isDark) Color(0xFF1E1B24) else Color.White
+                    containerColor = if (isDark) Color(0xFF121217) else Color.White
                 ),
                 elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
                 border = BorderStroke(
                     width = 1.dp,
-                    color = if (isDark) Color.White.copy(alpha = 0.08f) else Color.LightGray.copy(alpha = 0.3f)
+                    color = if (isDark) Color(0xFF1F1F28) else Color.LightGray.copy(alpha = 0.3f)
                 )
             ) {
                 Row(
@@ -4584,12 +4627,12 @@ fun BrowserHomepage(
                     .clickable { onDownloadsClick() },
                 shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (isDark) Color(0xFF1E1B24) else Color.White
+                    containerColor = if (isDark) Color(0xFF121217) else Color.White
                 ),
                 elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
                 border = BorderStroke(
                     width = 1.dp,
-                    color = if (isDark) Color.White.copy(alpha = 0.08f) else Color.LightGray.copy(alpha = 0.3f)
+                    color = if (isDark) Color(0xFF1F1F28) else Color.LightGray.copy(alpha = 0.3f)
                 )
             ) {
                 Row(
@@ -4639,12 +4682,12 @@ fun AboutBrowserDialog(
                 .padding(16.dp),
             shape = RoundedCornerShape(24.dp),
             colors = CardDefaults.cardColors(
-                containerColor = if (isDarkTheme) Color(0xFF131520) else Color.White
+                containerColor = if (isDarkTheme) Color(0xFF121217) else Color.White
             ),
             elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
             border = BorderStroke(
                 width = 1.dp,
-                color = if (isDarkTheme) Color.White.copy(alpha = 0.08f) else Color.LightGray.copy(alpha = 0.4f)
+                color = if (isDarkTheme) Color(0xFF1F1F28) else Color.LightGray.copy(alpha = 0.4f)
             )
         ) {
             Column(
@@ -4658,7 +4701,7 @@ fun AboutBrowserDialog(
                     modifier = Modifier
                         .size(100.dp)
                         .clip(RoundedCornerShape(24.dp))
-                        .background(if (isDarkTheme) Color(0xFF1E1B24) else Color(0xFFF1F3F4))
+                        .background(if (isDarkTheme) Color(0xFF08080A) else Color(0xFFF1F3F4))
                         .padding(18.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -4715,7 +4758,7 @@ fun AboutBrowserDialog(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .background(
-                                    color = if (isDarkTheme) Color.White.copy(alpha = 0.04f) else Color(0xFFF1F3F4),
+                                    color = if (isDarkTheme) Color(0xFF08080A) else Color(0xFFF1F3F4),
                                     shape = RoundedCornerShape(12.dp)
                                 )
                                 .padding(12.dp),

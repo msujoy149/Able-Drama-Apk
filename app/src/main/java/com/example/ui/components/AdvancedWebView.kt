@@ -46,6 +46,7 @@ fun AdvancedWebView(
     viewModel: BrowserViewModel,
     tabId: String,
     isVisible: Boolean = true,
+    isDarkTheme: Boolean = false,
     modifier: Modifier = Modifier,
     onShowCustomView: (android.view.View, WebChromeClient.CustomViewCallback) -> Unit = { _, _ -> },
     onHideCustomView: () -> Unit = {},
@@ -78,6 +79,9 @@ fun AdvancedWebView(
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
             
+            isFocusable = true
+            isFocusableInTouchMode = true
+            
             // WebViews in hybrid apps should have third-party cookie support enabled
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             
@@ -93,6 +97,10 @@ fun AdvancedWebView(
                 displayZoomControls = false
                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                 mediaPlaybackRequiresUserGesture = false
+                cacheMode = WebSettings.LOAD_DEFAULT
+                setSupportZoom(true)
+                textZoom = 100
+                setSupportMultipleWindows(false)
             }
 
             // Custom Download listener to show 1DM style Downloader Dialog
@@ -106,6 +114,10 @@ fun AdvancedWebView(
                 false
             }
         }
+    }
+
+    LaunchedEffect(webView, isDarkTheme) {
+        applyBrowserLevelDarkTheme(webView, isDarkTheme)
     }
 
     // Clean up older webViews safely to prevent leaking native rendering contexts and memory
@@ -233,6 +245,9 @@ fun AdvancedWebView(
             super.onPageStarted(view, url, favicon)
             viewModel.updateLoadingStatus(tabId, true, 10)
             viewModel.updateWebThemeColor(tabId, null)
+            if (view != null) {
+                applyBrowserLevelDarkTheme(view, isDarkTheme)
+            }
         }
 
         override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
@@ -258,6 +273,9 @@ fun AdvancedWebView(
         override fun onPageFinished(view: WebView?, url: String?) {
             super.onPageFinished(view, url)
             viewModel.updateLoadingStatus(tabId, false, 100)
+            if (view != null) {
+                applyBrowserLevelDarkTheme(view, isDarkTheme)
+            }
             if (url != null && view != null) {
                 view.evaluateJavascript(
                     "(function() {\n" +
@@ -336,6 +354,9 @@ fun AdvancedWebView(
         override fun onProgressChanged(view: WebView?, newProgress: Int) {
             super.onProgressChanged(view, newProgress)
             viewModel.updateLoadingStatus(tabId, newProgress < 100, newProgress)
+            if (view != null && newProgress >= 15) {
+                applyBrowserLevelDarkTheme(view, isDarkTheme)
+            }
         }
 
         override fun onReceivedTitle(view: WebView?, title: String?) {
@@ -400,12 +421,9 @@ fun AdvancedWebView(
     }
 
     LaunchedEffect(webView, isVisible) {
-        if (isVisible) {
-            kotlinx.coroutines.delay(2000)
-            while (true) {
-                captureWebViewThumbnail(webView, tabId, viewModel)
-                kotlinx.coroutines.delay(4000)
-            }
+        if (!isVisible) {
+            // Screen is being hidden, capture its last state immediately for tab switcher
+            captureWebViewThumbnail(webView, tabId, viewModel)
         }
     }
 
@@ -427,25 +445,46 @@ private fun captureWebViewThumbnail(webView: WebView, tabId: String, viewModel: 
             val width = webView.width
             val height = webView.height
             if (width > 0 && height > 0) {
-                val originalBitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
-                val canvas = android.graphics.Canvas(originalBitmap)
-                webView.draw(canvas)
-                
                 val maxDim = 320
                 val scale = maxDim.toFloat() / Math.max(width, height).toFloat()
-                val finalBitmap = if (scale < 1.0f) {
-                    val sw = (width * scale).toInt()
-                    val sh = (height * scale).toInt()
-                    val scaled = android.graphics.Bitmap.createScaledBitmap(originalBitmap, sw, sh, true)
-                    originalBitmap.recycle()
-                    scaled
+                if (scale < 1.0f) {
+                    val sw = (width * scale).toInt().coerceAtLeast(1)
+                    val sh = (height * scale).toInt().coerceAtLeast(1)
+                    val thumbnail = android.graphics.Bitmap.createBitmap(sw, sh, android.graphics.Bitmap.Config.ARGB_8888)
+                    val canvas = android.graphics.Canvas(thumbnail)
+                    canvas.scale(scale, scale)
+                    webView.draw(canvas)
+                    viewModel.updateTabScreenshot(tabId, thumbnail)
                 } else {
-                    originalBitmap
+                    val thumbnail = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+                    val canvas = android.graphics.Canvas(thumbnail)
+                    webView.draw(canvas)
+                    viewModel.updateTabScreenshot(tabId, thumbnail)
                 }
-                viewModel.updateTabScreenshot(tabId, finalBitmap)
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
+}
+
+internal fun applyBrowserLevelDarkTheme(webView: WebView, isDarkTheme: Boolean) {
+    try {
+        val settings = webView.settings
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            settings.setAlgorithmicDarkeningAllowed(false)
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            settings.setForceDark(WebSettings.FORCE_DARK_OFF)
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+
+    // Completely remove the injected styles to prevent any website content/color inversion or overriding
+    val js = "(function() {\n" +
+            "  var style = document.getElementById('able-dark-theme-style');\n" +
+            "  if (style) { style.parentNode.removeChild(style); }\n" +
+            "})()"
+    webView.evaluateJavascript(js, null)
 }
