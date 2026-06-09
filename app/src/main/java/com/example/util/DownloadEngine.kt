@@ -1,11 +1,14 @@
 package com.example.util
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
 import android.widget.Toast
 import com.example.data.DownloadItem
 import com.example.data.DownloadRepository
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import java.io.File
 import java.io.InputStream
 import java.io.RandomAccessFile
@@ -16,16 +19,40 @@ import java.util.concurrent.ConcurrentHashMap
 
 object DownloadEngine {
     private const val TAG = "DownloadEngine"
-    private val activeJobs = ConcurrentHashMap<Long, Job>()
-    private var repository: DownloadRepository? = null
+    val activeJobs = ConcurrentHashMap<Long, Job>()
+    var repository: DownloadRepository? = null
+    var appContext: Context? = null
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    fun init(repo: DownloadRepository) {
+    fun init(context: Context, repo: DownloadRepository) {
+        appContext = context.applicationContext
         repository = repo
+    }
+
+    fun isNetworkAvailable(context: Context): Boolean {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+        val activeNetwork = connectivityManager.activeNetwork ?: return false
+        val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     fun startDownload(context: Context, itemId: Long, scope: CoroutineScope? = null) {
         if (activeJobs.containsKey(itemId)) return // already running
+
+        // Start the Foreground service
+        try {
+            val serviceIntent = android.content.Intent(context, DownloadForegroundService::class.java).apply {
+                action = DownloadForegroundService.ACTION_START
+                putExtra(DownloadForegroundService.EXTRA_ITEM_ID, itemId)
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting DownloadForegroundService", e)
+        }
 
         // Enforce maximum concurrent downloads limit set in Settings
         val sharedPrefs = context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE)
@@ -124,6 +151,7 @@ object DownloadEngine {
                 }
             } finally {
                 activeJobs.remove(itemId)
+                appContext?.let { triggerNextDownload(it) }
             }
         }
 
@@ -164,7 +192,7 @@ object DownloadEngine {
                 val endByte = if (i == numParts - 1) totalLength - 1 else (i + 1) * partSize - 1
                 
                 async(Dispatchers.IO) {
-                    var retriesLeft = 3
+                    var retriesLeft = 15
                     var partSuccess = false
 
                     while (retriesLeft > 0 && !partSuccess && isActive) {
@@ -172,6 +200,11 @@ object DownloadEngine {
                         var inputStream: InputStream? = null
                         var raf: RandomAccessFile? = null
                         try {
+                            // Wait for network connectivity if offline
+                            while (!isNetworkAvailable(context) && isActive) {
+                                delay(3000L)
+                            }
+
                             val currentPartDownloaded = partFiles[i].length()
                             val requestStart = startByte + currentPartDownloaded
                             
@@ -215,9 +248,9 @@ object DownloadEngine {
                             partSuccess = true
                         } catch (e: Exception) {
                             retriesLeft--
-                            Log.w(TAG, "Chunk $i failed (${3 - retriesLeft} retries matches): ${e.localizedMessage}")
+                            Log.w(TAG, "Chunk $i failed (${15 - retriesLeft}/15 retries): ${e.localizedMessage}")
                             if (retriesLeft > 0 && isActive) {
-                                delay(1000)
+                                delay(2000)
                             }
                         } finally {
                             try { raf?.close() } catch (e: Exception) {}
@@ -327,6 +360,7 @@ object DownloadEngine {
                         )
                     )
                 }
+                appContext?.let { triggerNextDownload(it) }
             } else {
                 throw Exception("Threads cancelled or connection failed.")
             }
@@ -341,100 +375,152 @@ object DownloadEngine {
     ) {
         var item = initialItem
         val outputFile = File(item.filePath)
-        var existingBytes = if (outputFile.exists() && item.isResumeSupported) outputFile.length() else 0L
+        val destinationDir = outputFile.parentFile
+        if (destinationDir != null && !destinationDir.exists()) {
+            destinationDir.mkdirs()
+        }
 
+        var totalDownloaded = if (outputFile.exists() && item.isResumeSupported) outputFile.length() else 0L
         if (!item.isResumeSupported) {
-            existingBytes = 0L
+            totalDownloaded = 0L
             if (outputFile.exists()) {
                 outputFile.delete()
             }
         }
 
-        val url = URL(item.url)
-        val connection = url.openConnection() as HttpURLConnection
-        connection.connectTimeout = 15000
-        connection.readTimeout = 15000
-
-        if (existingBytes > 0) {
-            connection.setRequestProperty("Range", "bytes=$existingBytes-")
-        }
-
-        connection.connect()
-
-        val responseCode = connection.responseCode
-        val isPartial = (responseCode == HttpURLConnection.HTTP_PARTIAL)
-        val isOk = (responseCode == HttpURLConnection.HTTP_OK)
-
-        if (!isPartial && !isOk) {
-            throw Exception("Server responded with code $responseCode")
-        }
-
-        val inputStream: InputStream = connection.inputStream
-        val raf = RandomAccessFile(outputFile, "rw")
-        if (isPartial) {
-            raf.seek(existingBytes)
-        } else {
-            raf.setLength(0)
-        }
-
-        val buffer = ByteArray(32768)
-        var bytesRead: Int
         var lastUpdateTime = System.currentTimeMillis()
         var downloadedSinceLastUpdate = 0L
-        var totalDownloaded = existingBytes
+        var consecutiveErrors = 0
+        val maxConsecutiveErrors = 15 // Retry up to 15 times before failing
 
-        while (isActive) {
-            bytesRead = inputStream.read(buffer)
-            if (bytesRead == -1) break
+        while (isActive && (totalLength <= 0 || totalDownloaded < totalLength)) {
+            var connection: HttpURLConnection? = null
+            var inputStream: InputStream? = null
+            var raf: RandomAccessFile? = null
 
-            raf.write(buffer, 0, bytesRead)
-            totalDownloaded += bytesRead
-            downloadedSinceLastUpdate += bytesRead
-
-            val currentTime = System.currentTimeMillis()
-            val timeDiff = currentTime - lastUpdateTime
-            if (timeDiff >= 1000) {
-                val speedBytesPerSec = (downloadedSinceLastUpdate * 1000) / timeDiff
-                val speedText = formatSpeed(speedBytesPerSec)
-                
-                val progressPercent = if (totalLength > 0) {
-                    (totalDownloaded.toFloat() / totalLength.toFloat()) * 100f
-                } else {
-                    0f
+            try {
+                // Wait for network connectivity if offline
+                while (!isNetworkAvailable(context) && isActive) {
+                    val currentItem = repo.getDownloadById(item.id)
+                    if (currentItem == null || currentItem.status != "DOWNLOADING") return
+                    repo.updateDownload(currentItem.copy(
+                        downloadSpeed = "Offline",
+                        eta = "Waiting for connection..."
+                    ))
+                    delay(3000L)
                 }
 
-                val remainingBytes = totalLength - totalDownloaded
-                val etaText = if (speedBytesPerSec > 0 && remainingBytes > 0) {
-                    formatEta(remainingBytes / speedBytesPerSec)
-                } else {
-                    "--"
+                val url = URL(item.url)
+                connection = url.openConnection() as HttpURLConnection
+                connection.connectTimeout = 15000
+                connection.readTimeout = 15000
+
+                if (totalDownloaded > 0) {
+                    connection.setRequestProperty("Range", "bytes=$totalDownloaded-")
                 }
 
+                connection.connect()
+
+                val responseCode = connection.responseCode
+                val isPartial = (responseCode == HttpURLConnection.HTTP_PARTIAL)
+                val isOk = (responseCode == HttpURLConnection.HTTP_OK)
+
+                if (!isPartial && !isOk) {
+                    throw Exception("Server responded with code $responseCode")
+                }
+
+                inputStream = connection.inputStream
+                raf = RandomAccessFile(outputFile, "rw")
+                if (isPartial) {
+                    raf.seek(totalDownloaded)
+                } else {
+                    if (totalDownloaded > 0) {
+                        totalDownloaded = 0L
+                    }
+                    raf.setLength(0)
+                }
+
+                consecutiveErrors = 0 // Reset error counter on successful connect/read
+
+                val buffer = ByteArray(32768)
+                var bytesRead: Int
+
+                while (isActive) {
+                    try {
+                        bytesRead = inputStream.read(buffer)
+                    } catch (e: Exception) {
+                        throw e
+                    }
+                    if (bytesRead == -1) break
+
+                    raf.write(buffer, 0, bytesRead)
+                    totalDownloaded += bytesRead
+                    downloadedSinceLastUpdate += bytesRead
+
+                    val currentTime = System.currentTimeMillis()
+                    val timeDiff = currentTime - lastUpdateTime
+                    if (timeDiff >= 1000) {
+                        val speedBytesPerSec = (downloadedSinceLastUpdate * 1000) / timeDiff
+                        val speedText = formatSpeed(speedBytesPerSec)
+                        
+                        val progressPercent = if (totalLength > 0) {
+                            (totalDownloaded.toFloat() / totalLength.toFloat()) * 100f
+                        } else {
+                            0f
+                        }
+
+                        val remainingBytes = totalLength - totalDownloaded
+                        val etaText = if (speedBytesPerSec > 0 && remainingBytes > 0) {
+                            formatEta(remainingBytes / speedBytesPerSec)
+                        } else {
+                            "--"
+                        }
+
+                        val currentItem = repo.getDownloadById(item.id)
+                        if (currentItem == null || currentItem.status != "DOWNLOADING") {
+                            // Cancelled or paused
+                            return
+                        }
+                        item = currentItem.copy(
+                            bytesDownloaded = totalDownloaded,
+                            progress = progressPercent,
+                            downloadSpeed = speedText,
+                            eta = etaText
+                        )
+                        repo.updateDownload(item)
+
+                        downloadedSinceLastUpdate = 0L
+                        lastUpdateTime = currentTime
+                    }
+                }
+
+                if (totalDownloaded >= totalLength || totalLength <= 0) {
+                    break
+                }
+            } catch (e: Exception) {
+                consecutiveErrors++
+                Log.w(TAG, "Download error in downloadSingleThread (attempt $consecutiveErrors): ${e.localizedMessage}")
+                if (consecutiveErrors >= maxConsecutiveErrors) {
+                    throw e
+                }
+                val waitTime = (consecutiveErrors * 2000L).coerceAtMost(15000L)
                 val currentItem = repo.getDownloadById(item.id)
-                if (currentItem != null && currentItem.status == "DOWNLOADING") {
-                    item = currentItem.copy(
-                        bytesDownloaded = totalDownloaded,
-                        progress = progressPercent,
-                        downloadSpeed = speedText,
-                        eta = etaText
-                    )
-                    repo.updateDownload(item)
-                }
-
-                // Reset ticker
-                downloadedSinceLastUpdate = 0L
-                lastUpdateTime = currentTime
+                if (currentItem == null || currentItem.status != "DOWNLOADING") return
+                repo.updateDownload(currentItem.copy(
+                    downloadSpeed = "Connecting...",
+                    eta = "Retry $consecutiveErrors/$maxConsecutiveErrors"
+                ))
+                delay(waitTime)
+            } finally {
+                try { raf?.close() } catch (e: Exception) {}
+                try { inputStream?.close() } catch (e: Exception) {}
+                try { connection?.disconnect() } catch (e: Exception) {}
             }
         }
 
-        raf.close()
-        inputStream.close()
-        connection.disconnect()
-
         if (isActive) {
-            // Completed successfully
             val finalItemState = repo.getDownloadById(item.id)
-            if (finalItemState != null) {
+            if (finalItemState != null && finalItemState.status == "DOWNLOADING") {
                 repo.updateDownload(
                     finalItemState.copy(
                         bytesDownloaded = totalDownloaded,
@@ -445,6 +531,7 @@ object DownloadEngine {
                     )
                 )
             }
+            appContext?.let { triggerNextDownload(it) }
         }
     }
 
@@ -463,6 +550,29 @@ object DownloadEngine {
                     downloadSpeed = "Paused",
                     eta = "--"
                 ))
+            }
+            appContext?.let { triggerNextDownload(it) }
+        }
+    }
+
+    fun triggerNextDownload(context: Context) {
+        val repo = repository ?: return
+        val sharedPrefs = context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE)
+        val limit = sharedPrefs.getInt("concurrent_downloads_limit", 3)
+        
+        if (limit != 999 && activeJobs.size >= limit) return
+        
+        engineScope.launch {
+            try {
+                val dbItems = repo.allDownloads.first()
+                val queuedItem = dbItems.firstOrNull { it.status == "PAUSED" && it.eta == "Simultaneous limit reached" }
+                if (queuedItem != null) {
+                    withContext(Dispatchers.Main) {
+                        startDownload(context.applicationContext, queuedItem.id)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error triggering next download in queue", e)
             }
         }
     }

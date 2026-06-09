@@ -12,6 +12,12 @@ import android.webkit.WebChromeClient
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.Manifest
+import android.os.Build
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import coil.compose.AsyncImage
@@ -274,7 +280,7 @@ class MainActivity : ComponentActivity() {
 
         val repository = BrowserRepository(db.browserDao())
         val downloadRepository = DownloadRepository(db.downloadDao())
-        DownloadEngine.init(downloadRepository)
+        DownloadEngine.init(applicationContext, downloadRepository)
         val networkMonitor = NetworkMonitor(applicationContext)
 
         // Pre-create/retrieve the BrowserViewModel so that the Activity can access it for clipboard redirection
@@ -284,6 +290,56 @@ class MainActivity : ComponentActivity() {
         setContent {
             val context = LocalContext.current
             val prefs = remember { context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE) }
+
+            // Notification Permission Handling
+            val permissionLauncher = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.RequestPermission()
+            ) { isGranted ->
+                prefs.edit().putBoolean("asked_notification_permission", true).apply()
+            }
+
+            var showPermissionPrompt by remember {
+                mutableStateOf(
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    !prefs.getBoolean("asked_notification_permission", false) &&
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                )
+            }
+
+            if (showPermissionPrompt) {
+                AlertDialog(
+                    onDismissRequest = {
+                        prefs.edit().putBoolean("asked_notification_permission", true).apply()
+                        showPermissionPrompt = false
+                    },
+                    title = { Text("Notification Permission") },
+                    text = { Text("Allow notifications for download progress and background downloads?") },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                prefs.edit().putBoolean("asked_notification_permission", true).apply()
+                                showPermissionPrompt = false
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                            }
+                        ) {
+                            Text("Allow")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = {
+                                prefs.edit().putBoolean("asked_notification_permission", true).apply()
+                                showPermissionPrompt = false
+                            }
+                        ) {
+                            Text("Deny")
+                        }
+                    }
+                )
+            }
+
             var isDarkTheme by remember {
                 mutableStateOf(prefs.getBoolean("is_dark_theme", true))
             }
@@ -400,6 +456,14 @@ enum class AppTab {
     ACCOUNT
 }
 
+data class NavigationHistoryEntry(
+    val tab: AppTab,
+    val url: String = "",
+    val showDownloadManagerDialog: Boolean = false,
+    val showBrowserHistoryDialog: Boolean = false,
+    val showAboutBrowserDialog: Boolean = false
+)
+
 enum class BottomNavItem {
     MOVIES,
     DRAMA,
@@ -420,6 +484,9 @@ fun MainAppContent(
     onHideCustomView: () -> Unit
 ) {
     val context = LocalContext.current
+
+    // Navigation and history state list
+    val navHistory = remember { mutableStateListOf<NavigationHistoryEntry>() }
 
     // Collect app states dynamically
     var currentTab by remember { mutableStateOf(AppTab.BROWSER) }
@@ -452,23 +519,95 @@ fun MainAppContent(
 
     val coroutineScope = rememberCoroutineScope()
 
-    // Graceful back handling for the Web Browser tab
-    androidx.activity.compose.BackHandler(enabled = currentTab == AppTab.BROWSER) {
-        if (canGoBack) {
-            viewModel.goBack()
-        } else if (currentUrl != "browser://home") {
-            viewModel.loadUrl("browser://home")
-            showUrlBar = false
-        } else {
-            currentTab = AppTab.ACCOUNT
-            showUrlBar = false
-        }
-    }
     var showDownloadFileDialog by remember { mutableStateOf(false) }
     var downloadPendingUrl by remember { mutableStateOf("") }
     var showDownloadManagerDialog by remember { mutableStateOf(false) }
     var showBrowserHistoryDialog by remember { mutableStateOf(false) }
     var showAboutBrowserDialog by remember { mutableStateOf(false) }
+    var showTelegramDialog by remember { mutableStateOf(false) }
+    var showExitDialog by remember { mutableStateOf(false) }
+
+    fun pushToHistory() {
+        val entry = NavigationHistoryEntry(
+            tab = currentTab,
+            url = currentUrl,
+            showDownloadManagerDialog = showDownloadManagerDialog,
+            showBrowserHistoryDialog = showBrowserHistoryDialog,
+            showAboutBrowserDialog = showAboutBrowserDialog
+        )
+        val last = navHistory.lastOrNull()
+        if (last == null || last != entry) {
+            navHistory.add(entry)
+            android.util.Log.d("NavHistory", "Pushed state; stack size: ${navHistory.size}, entry: $entry")
+        }
+    }
+
+    fun popHistory(): Boolean {
+        if (navHistory.isNotEmpty()) {
+            val entry = navHistory.removeAt(navHistory.size - 1)
+            android.util.Log.d("NavHistory", "Popping state; stack size: ${navHistory.size}, restoring entry: $entry")
+            
+            currentTab = entry.tab
+            showDownloadManagerDialog = entry.showDownloadManagerDialog
+            showBrowserHistoryDialog = entry.showBrowserHistoryDialog
+            showAboutBrowserDialog = entry.showAboutBrowserDialog
+            
+            if (entry.tab == AppTab.BROWSER && entry.url.isNotEmpty() && entry.url != currentUrl) {
+                viewModel.loadUrl(entry.url)
+            }
+            return true
+        }
+        return false
+    }
+
+    // Graceful back handling for all tabs, views, and overlays
+    androidx.activity.compose.BackHandler(enabled = true) {
+        when {
+            showDownloadFileDialog -> {
+                showDownloadFileDialog = false
+            }
+            showDownloadManagerDialog -> {
+                if (!popHistory()) {
+                    showDownloadManagerDialog = false
+                }
+            }
+            showBrowserHistoryDialog -> {
+                if (!popHistory()) {
+                    showBrowserHistoryDialog = false
+                }
+            }
+            showAboutBrowserDialog -> {
+                if (!popHistory()) {
+                    showAboutBrowserDialog = false
+                }
+            }
+            showTelegramDialog -> {
+                showTelegramDialog = false
+            }
+            currentTab == AppTab.BROWSER && canGoBack -> {
+                viewModel.goBack()
+            }
+            else -> {
+                if (!popHistory()) {
+                    val isAtHome = (currentUrl == "browser://home" || 
+                                    currentUrl.isBlank() || 
+                                    currentUrl.trim().trimEnd('/') == "https://www.abledrama.top" || 
+                                    currentUrl.trim().trimEnd('/') == "https://abledrama.top")
+                    
+                    if (currentTab != AppTab.BROWSER) {
+                        pushToHistory()
+                        currentTab = AppTab.BROWSER
+                        showUrlBar = false
+                    } else if (!isAtHome) {
+                        viewModel.loadUrl("browser://home")
+                        showUrlBar = false
+                    } else {
+                        showExitDialog = true
+                    }
+                }
+            }
+        }
+    }
 
     LaunchedEffect(currentTab, showUrlBar) {
         MainActivity.isAbleDramaActive = (showUrlBar == false || currentTab == AppTab.ACCOUNT)
@@ -505,7 +644,6 @@ fun MainAppContent(
     }
 
     // Telegram VIP promotional campaign pop-up manager (triggers once per app launch session)
-    var showTelegramDialog by remember { mutableStateOf(false) }
     var hasShownTelegramThisSession by rememberSaveable { mutableStateOf(false) }
     var telegramCountdown by remember { mutableIntStateOf(5) }
 
@@ -567,35 +705,38 @@ fun MainAppContent(
                 CustomBottomNavBar(
                     selectedItem = selectedBottomItem,
                     onItemSelected = { item ->
-                        selectedBottomItem = item
                         when (item) {
-                            BottomNavItem.MOVIES -> {
-                                currentTab = AppTab.BROWSER
-                                showUrlBar = false
-                                viewModel.loadUrl("https://www.abledrama.top/search/label/Movies")
-                            }
-                            BottomNavItem.DRAMA -> {
-                                currentTab = AppTab.BROWSER
-                                showUrlBar = false
-                                viewModel.loadUrl("https://www.abledrama.top/search/label/Drama")
-                            }
-                            BottomNavItem.WEB_SERIES -> {
-                                currentTab = AppTab.BROWSER
-                                showUrlBar = false
-                                viewModel.loadUrl("https://www.abledrama.top/search/label/Web%20Series")
-                            }
-                            BottomNavItem.SHORT_DRAMA -> {
-                                currentTab = AppTab.BROWSER
-                                showUrlBar = false
-                                viewModel.loadUrl("https://www.abledrama.top/search/label/Short%20Drama")
-                            }
-                            BottomNavItem.ANIME -> {
-                                currentTab = AppTab.BROWSER
-                                showUrlBar = false
-                                viewModel.loadUrl("https://www.abledrama.top/search/label/Anime")
-                            }
                             BottomNavItem.ACCOUNT -> {
-                                currentTab = AppTab.ACCOUNT
+                                if (currentTab == AppTab.ACCOUNT) {
+                                    // Tap Main Menu Again -> Close & Return to previous state
+                                    popHistory()
+                                } else {
+                                    pushToHistory()
+                                    currentTab = AppTab.ACCOUNT
+                                }
+                            }
+                            else -> {
+                                pushToHistory()
+                                currentTab = AppTab.BROWSER
+                                showUrlBar = false
+                                when (item) {
+                                    BottomNavItem.MOVIES -> {
+                                        viewModel.loadUrl("https://www.abledrama.top/search/label/Movies")
+                                    }
+                                    BottomNavItem.DRAMA -> {
+                                        viewModel.loadUrl("https://www.abledrama.top/search/label/Drama")
+                                    }
+                                    BottomNavItem.WEB_SERIES -> {
+                                        viewModel.loadUrl("https://www.abledrama.top/search/label/Web%20Series")
+                                    }
+                                    BottomNavItem.SHORT_DRAMA -> {
+                                        viewModel.loadUrl("https://www.abledrama.top/search/label/Short%20Drama")
+                                    }
+                                    BottomNavItem.ANIME -> {
+                                        viewModel.loadUrl("https://www.abledrama.top/search/label/Anime")
+                                    }
+                                    else -> {}
+                                }
                             }
                         }
                     }
@@ -672,12 +813,15 @@ fun MainAppContent(
                                 showUrlBar = false
                             },
                             onHistoryClick = {
+                                pushToHistory()
                                 showBrowserHistoryDialog = true
                             },
                             onDownloadClick = {
+                                pushToHistory()
                                 showDownloadManagerDialog = true
                             },
                             onAboutClick = {
+                                pushToHistory()
                                 showAboutBrowserDialog = true
                             },
                             focusRequester = urlBarFocusRequester,
@@ -711,9 +855,11 @@ fun MainAppContent(
                                                         viewModel.triggerSearchFocus(true)
                                                     },
                                                     onHistoryClick = {
+                                                        pushToHistory()
                                                         showBrowserHistoryDialog = true
                                                     },
                                                     onDownloadsClick = {
+                                                        pushToHistory()
                                                         showDownloadManagerDialog = true
                                                     },
                                                     modifier = Modifier.fillMaxSize()
@@ -737,6 +883,7 @@ fun MainAppContent(
                                                     }
                                                 },
                                                 onDownloadRequested = { url, contentDisposition, mimeType, contentLength ->
+                                                    pushToHistory()
                                                     downloadPendingUrl = url
                                                     showDownloadFileDialog = true
                                                 }
@@ -801,13 +948,25 @@ fun MainAppContent(
                             }
                         }
 
-                        if (currentTab == AppTab.ACCOUNT) {
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = currentTab == AppTab.ACCOUNT,
+                            enter = slideInHorizontally(
+                                initialOffsetX = { fullWidth -> fullWidth },
+                                animationSpec = androidx.compose.animation.core.tween(durationMillis = 300, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                            ) + fadeIn(animationSpec = androidx.compose.animation.core.tween(300)),
+                            exit = slideOutHorizontally(
+                                targetOffsetX = { fullWidth -> fullWidth },
+                                animationSpec = androidx.compose.animation.core.tween(durationMillis = 300, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                            ) + fadeOut(animationSpec = androidx.compose.animation.core.tween(300)),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
                             MyAccountTab(
                                 bookmarks = bookmarks,
                                 history = history,
                                 isDarkTheme = isDarkTheme,
                                 onToggleDarkTheme = onToggleDarkTheme,
                                 onSectionClick = { targetUrl ->
+                                    pushToHistory()
                                     viewModel.loadUrl(targetUrl)
                                     currentTab = AppTab.BROWSER
                                     showUrlBar = false
@@ -827,14 +986,17 @@ fun MainAppContent(
                                     }
                                 },
                                 onDownloadClick = {
+                                    pushToHistory()
                                     showDownloadManagerDialog = true
                                 },
                                 onBrowserToggleClick = {
+                                    pushToHistory()
                                     viewModel.loadUrl("browser://home")
                                     currentTab = AppTab.BROWSER
                                     showUrlBar = false
                                 },
                                 onUrlPasteGoClick = { targetUrl ->
+                                    pushToHistory()
                                     viewModel.loadUrl(targetUrl)
                                     currentTab = AppTab.BROWSER
                                     showUrlBar = true
@@ -861,6 +1023,29 @@ fun MainAppContent(
                 onDismissRequest = { showDownloadManagerDialog = false },
                 downloadRepository = downloadRepository,
                 coroutineScope = coroutineScope
+            )
+        }
+
+        if (showExitDialog) {
+            AlertDialog(
+                onDismissRequest = { showExitDialog = false },
+                title = { Text("Exit App", fontWeight = FontWeight.Bold) },
+                text = { Text("Are you sure you want to exit the app?") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showExitDialog = false
+                            (context as? android.app.Activity)?.finish()
+                        }
+                    ) {
+                        Text("Exit", color = Color.Red, fontWeight = FontWeight.SemiBold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showExitDialog = false }) {
+                        Text("Cancel", fontWeight = FontWeight.SemiBold)
+                    }
+                }
             )
         }
 
@@ -1272,147 +1457,154 @@ fun BrowserToolbar(
             }
 
             // Beautiful rounded URL address bar container with typing capabilities
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(38.dp)
-                    .padding(horizontal = 4.dp)
-                    .background(
-                        color = if (isLightColor) Color(0xFFF1F3F4) else Color.White.copy(alpha = 0.15f),
-                        shape = RoundedCornerShape(19.dp)
-                    )
-                    .padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Dynamic header branding / Lock / Search
-                if (!isEditing && currentUrl == "browser://home") {
-                    Icon(
-                        imageVector = Icons.Default.Language,
-                        contentDescription = "Browser Header Logo",
-                        tint = contentColor.copy(alpha = 0.7f),
-                        modifier = Modifier.size(16.dp)
-                    )
-                } else {
-                    Icon(
-                        imageVector = if (isEditing) Icons.Default.Search else Icons.Default.Lock,
-                        contentDescription = if (isEditing) "Search" else "SSL Secure",
-                        tint = contentColor.copy(alpha = 0.7f),
-                        modifier = Modifier.size(15.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(6.dp))
-
-                androidx.compose.foundation.text.BasicTextField(
-                    value = if (isEditing) editUrlText else {
-                        if (currentUrl == "browser://home") {
-                            ""
-                        } else {
-                            try {
-                                val uri = Uri.parse(currentUrl)
-                                val host = uri.host ?: ""
-                                val path = uri.path ?: ""
-                                val cleanHost = host.removePrefix("www.")
-                                if (path.length > 1) {
-                                    cleanHost + path
-                                } else {
-                                    cleanHost
-                                }
-                            } catch (e: Exception) {
-                                currentUrl.removePrefix("https://").removePrefix("http://").removePrefix("www.")
-                            }
-                        }
-                    },
-                    onValueChange = { newValue ->
-                        if (isEditing) {
-                            editUrlText = newValue
-                        }
-                    },
+            if (currentUrl == "browser://home") {
+                // On home page, hide top URL/address bar and replace with empty space
+                Spacer(modifier = Modifier.weight(1f))
+            } else {
+                Row(
                     modifier = Modifier
                         .weight(1f)
-                        .focusRequester(focusRequester)
-                        .onFocusChanged { focusState ->
-                            isEditing = focusState.isFocused
-                            if (focusState.isFocused) {
-                                val trimmed = currentUrl.trim().lowercase().removeSuffix("/")
-                                val isGoogleHome = trimmed == "https://www.google.com" || 
-                                                   trimmed == "https://google.com" || 
-                                                   trimmed == "http://www.google.com" || 
-                                                   trimmed == "http://google.com"
-                                val isAbleDramaHome = trimmed == "https://www.abledrama.top" || 
-                                                      trimmed == "https://abledrama.top" ||
-                                                      trimmed == "http://www.abledrama.top" || 
-                                                      trimmed == "http://abledrama.top"
-                                val isBrowserHome = trimmed == "browser://home"
-                                if (isGoogleHome || isAbleDramaHome || isBrowserHome) {
-                                    editUrlText = ""
-                                } else {
-                                    editUrlText = currentUrl
+                        .height(38.dp)
+                        .padding(horizontal = 4.dp)
+                        .background(
+                            color = if (isLightColor) Color(0xFFF1F3F4) else Color.White.copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(19.dp)
+                        )
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Dynamic header branding / Lock / Search
+                    if (!isEditing && currentUrl == "browser://home") {
+                        Icon(
+                            imageVector = Icons.Default.Language,
+                            contentDescription = "Browser Header Logo",
+                            tint = contentColor.copy(alpha = 0.7f),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = if (isEditing) Icons.Default.Search else Icons.Default.Lock,
+                            contentDescription = if (isEditing) "Search" else "SSL Secure",
+                            tint = contentColor.copy(alpha = 0.7f),
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    androidx.compose.foundation.text.BasicTextField(
+                        value = if (isEditing) editUrlText else {
+                            if (currentUrl == "browser://home") {
+                                ""
+                            } else {
+                                try {
+                                    val uri = Uri.parse(currentUrl)
+                                    val host = uri.host ?: ""
+                                    val path = uri.path ?: ""
+                                    val cleanHost = host.removePrefix("www.")
+                                    if (path.length > 1) {
+                                        cleanHost + path
+                                    } else {
+                                        cleanHost
+                                    }
+                                } catch (e: Exception) {
+                                    currentUrl.removePrefix("https://").removePrefix("http://").removePrefix("www.")
                                 }
                             }
-                        }
-                        .testTag("browser_url_input"),
-                    textStyle = androidx.compose.ui.text.TextStyle(
-                        color = contentColor,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
-                    ),
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Uri,
-                        imeAction = ImeAction.Go
-                    ),
-                    keyboardActions = KeyboardActions(
-                        onGo = {
-                            val target = editUrlText.trim()
-                            if (target.isNotEmpty()) {
-                                onUrlSubmit(target)
+                        },
+                        onValueChange = { newValue ->
+                            if (isEditing) {
+                                editUrlText = newValue
                             }
-                            focusManager.clearFocus()
-                        }
-                    ),
-                    decorationBox = { innerTextField ->
-                        Box(modifier = Modifier.fillMaxWidth()) {
-                            if ((isEditing && editUrlText.isEmpty()) || (!isEditing && currentUrl == "browser://home")) {
-                                Text(
-                                    text = "Search or type URL",
-                                    color = contentColor.copy(alpha = 0.5f),
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusRequester(focusRequester)
+                            .onFocusChanged { focusState ->
+                                isEditing = focusState.isFocused
+                                if (focusState.isFocused) {
+                                    val trimmed = currentUrl.trim().lowercase().removeSuffix("/")
+                                    val isGoogleHome = trimmed == "https://www.google.com" || 
+                                                       trimmed == "https://google.com" || 
+                                                       trimmed == "http://www.google.com" || 
+                                                       trimmed == "http://google.com"
+                                    val isAbleDramaHome = trimmed == "https://www.abledrama.top" || 
+                                                          trimmed == "https://abledrama.top" ||
+                                                          trimmed == "http://www.abledrama.top" || 
+                                                          trimmed == "http://abledrama.top"
+                                    val isBrowserHome = trimmed == "browser://home"
+                                    if (isGoogleHome || isAbleDramaHome || isBrowserHome) {
+                                        editUrlText = ""
+                                    } else {
+                                        editUrlText = currentUrl
+                                    }
+                                }
                             }
-                            innerTextField()
+                            .testTag("browser_url_input"),
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            color = contentColor,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        ),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Uri,
+                            imeAction = ImeAction.Go
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onGo = {
+                                val target = editUrlText.trim()
+                                if (target.isNotEmpty()) {
+                                    onUrlSubmit(target)
+                                }
+                                focusManager.clearFocus()
+                            }
+                        ),
+                        decorationBox = { innerTextField ->
+                            Box(modifier = Modifier.fillMaxWidth()) {
+                                if ((isEditing && editUrlText.isEmpty()) || (!isEditing && currentUrl == "browser://home")) {
+                                    Text(
+                                        text = "Search or type URL",
+                                        color = contentColor.copy(alpha = 0.5f),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                                innerTextField()
+                            }
                         }
-                    }
-                )
+                    )
 
-                if (isEditing && editUrlText.isNotEmpty()) {
-                    IconButton(
-                        onClick = { editUrlText = "" },
-                        modifier = Modifier.size(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Clear address bar",
-                            tint = contentColor.copy(alpha = 0.6f),
-                            modifier = Modifier.size(14.dp)
-                        )
+                    if (isEditing && editUrlText.isNotEmpty()) {
+                        IconButton(
+                            onClick = { editUrlText = "" },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Clear address bar",
+                                tint = contentColor.copy(alpha = 0.6f),
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
                     }
                 }
             }
 
             if (!isEditing) {
-                // Plus icon ("+") - Hidden during focus for responsive full-width URL input
-                IconButton(
-                    onClick = onPlusClick,
-                    modifier = Modifier.size(38.dp).testTag("web_plus_btn")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "New Tab",
-                        tint = contentColor,
-                        modifier = Modifier.size(22.dp)
-                    )
+                // Plus icon ("+") - Hidden on home page, and hidden during focus
+                if (currentUrl != "browser://home") {
+                    IconButton(
+                        onClick = onPlusClick,
+                        modifier = Modifier.size(38.dp).testTag("web_plus_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "New Tab",
+                            tint = contentColor,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
                 }
 
                 // Tab switcher rounded-corner box - Hidden during focus
@@ -1817,6 +2009,13 @@ fun MyAccountTab(
     var showHistoryDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
     var urlInput by remember { mutableStateOf("") }
+
+    androidx.activity.compose.BackHandler(enabled = showHistoryDialog) {
+        showHistoryDialog = false
+    }
+    androidx.activity.compose.BackHandler(enabled = showBookmarksDialog) {
+        showBookmarksDialog = false
+    }
 
     if (showHistoryDialog) {
         var searchQuery by remember { mutableStateOf("") }
@@ -4414,12 +4613,16 @@ fun BrowserHomepage(
             modifier = Modifier.padding(top = 4.dp, bottom = 32.dp)
         )
 
-        // Large rounded search/address bar in center
+        var searchText by remember { mutableStateOf("") }
+        val homeFocusManager = androidx.compose.ui.platform.LocalFocusManager.current
+        val centerFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+
+        // Large rounded search/address bar in center - Fully interactive textfield
         Card(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(54.dp)
-                .clickable { onUrlFocusTrigger() }
+                .clickable { centerFocusRequester.requestFocus() }
                 .testTag("homepage_center_search_bar"),
             shape = RoundedCornerShape(27.dp),
             colors = CardDefaults.cardColors(
@@ -4446,12 +4649,60 @@ fun BrowserHomepage(
 
                 Spacer(modifier = Modifier.width(14.dp))
 
-                Text(
-                    text = "Search or type URL",
-                    color = if (isDark) Color.Gray else Color(0xFF5F6368),
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium
+                androidx.compose.foundation.text.BasicTextField(
+                    value = searchText,
+                    onValueChange = { searchText = it },
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(centerFocusRequester)
+                        .testTag("homepage_center_input"),
+                    textStyle = androidx.compose.ui.text.TextStyle(
+                        color = if (isDark) Color.White else Color(0xFF202124),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
+                    ),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Uri,
+                        imeAction = ImeAction.Go
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onGo = {
+                            val target = searchText.trim()
+                            if (target.isNotEmpty()) {
+                                viewModel.loadUrl(target)
+                            }
+                            homeFocusManager.clearFocus()
+                        }
+                    ),
+                    decorationBox = { innerTextField ->
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            if (searchText.isEmpty()) {
+                                Text(
+                                    text = "Search or type URL",
+                                    color = if (isDark) Color.Gray else Color(0xFF5F6368),
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                            innerTextField()
+                        }
+                    }
                 )
+
+                if (searchText.isNotEmpty()) {
+                    IconButton(
+                        onClick = { searchText = "" },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Clear search input",
+                            tint = if (isDark) Color.Gray else Color(0xFF5F6368),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
             }
         }
 

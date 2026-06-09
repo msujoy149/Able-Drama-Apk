@@ -813,6 +813,17 @@ fun DownloadManagerDialog(
         onDismissRequest = onDismissRequest,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
+        androidx.activity.compose.BackHandler(
+            enabled = showConcurrentDownloadsDialog || showDownloadPathDialog || showBatteryOptimizationDialog || showSortDialog || showAppInfoDialog || showDownloadStatsDialog
+        ) {
+            showConcurrentDownloadsDialog = false
+            showDownloadPathDialog = false
+            showBatteryOptimizationDialog = false
+            showSortDialog = false
+            showAppInfoDialog = false
+            showDownloadStatsDialog = false
+        }
+
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             topBar = {
