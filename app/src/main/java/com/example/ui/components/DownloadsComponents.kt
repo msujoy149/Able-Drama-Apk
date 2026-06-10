@@ -118,6 +118,54 @@ fun formatByteSize(bytes: Long): String {
     }
 }
 
+// Download Manager Theme to perfectly unify Light/Dark mode with #D0BCFF accent
+@Composable
+fun DownloadManagerTheme(content: @Composable () -> Unit) {
+    val context = LocalContext.current
+    val sharedPrefs = remember { context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE) }
+    val isDarkTheme = sharedPrefs.getBoolean("is_dark_theme", true)
+
+    val d0bcff = Color(0xFFD0BCFF)
+    
+    val colorScheme = if (isDarkTheme) {
+        darkColorScheme(
+            primary = d0bcff,
+            primaryContainer = Color(0xFF1C133A), // custom premium deep dark purple
+            onPrimary = Color(0xFF131317), // very dark background for light elements like FAB
+            onPrimaryContainer = d0bcff, // soft lilac text/icons on primary theme
+            secondary = d0bcff,
+            secondaryContainer = d0bcff.copy(alpha = 0.15f),
+            onSecondary = Color(0xFF131317),
+            onSecondaryContainer = d0bcff,
+            background = Color(0xFF08080A),
+            surface = Color(0xFF121217),
+            onBackground = Color(0xFFFFFFFF),
+            onSurface = Color(0xFFFFFFFF)
+        )
+    } else {
+        lightColorScheme(
+            primary = d0bcff,
+            primaryContainer = d0bcff, // solid lilac background in light mode
+            onPrimary = Color(0xFF131317),
+            onPrimaryContainer = Color(0xFF131317),
+            secondary = d0bcff,
+            secondaryContainer = d0bcff.copy(alpha = 0.12f),
+            onSecondary = Color(0xFF131317),
+            onSecondaryContainer = Color(0xFF131317),
+            background = Color(0xFFF9F9FB),
+            surface = Color.White,
+            onBackground = Color(0xFF131317),
+            onSurface = Color(0xFF131317)
+        )
+    }
+
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = MaterialTheme.typography,
+        content = content
+    )
+}
+
 // 1DM-Style "Download File!" Dialog (Screenshot)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -277,19 +325,20 @@ fun DownloadFileDialog(
     var useAdvancedDownloadMethod by remember { mutableStateOf(true) }
     var advanceOption by remember { mutableStateOf(false) }
 
-    Dialog(
-        onDismissRequest = onDismissRequest,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-                .wrapContentHeight(),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+    DownloadManagerTheme {
+        Dialog(
+            onDismissRequest = onDismissRequest,
+            properties = DialogProperties(usePlatformDefaultWidth = false)
         ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+                    .wrapContentHeight(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+            ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -663,6 +712,7 @@ fun DownloadFileDialog(
         }
     }
 }
+}
 
 
 // Interactive Downloads Manager dialog screen (Screenshot 2)
@@ -810,10 +860,11 @@ fun DownloadManagerDialog(
     }
 
     // Modal view
-    Dialog(
-        onDismissRequest = onDismissRequest,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
+    DownloadManagerTheme {
+        Dialog(
+            onDismissRequest = onDismissRequest,
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
         androidx.activity.compose.BackHandler(
             enabled = showConcurrentDownloadsDialog || showDownloadPathDialog || showBatteryOptimizationDialog || showSortDialog || showAppInfoDialog || showDownloadStatsDialog
         ) {
@@ -1026,7 +1077,9 @@ fun DownloadManagerDialog(
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold
                                     )
-                                }
+                                },
+                                selectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                unselectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
                             )
                         }
                     }
@@ -1036,14 +1089,16 @@ fun DownloadManagerDialog(
                 // Clicking the FAB (+) now directly launches the exact, fully matching Download file pop-up dialog
                 var showAddLinkDialog by remember { mutableStateOf(false) }
                 
+                val navBarsBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+                val bottomPadding = if (navBarsBottom + 24.dp > 84.dp) navBarsBottom + 24.dp else 84.dp
+
                 FloatingActionButton(
                     onClick = { showAddLinkDialog = true },
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = MaterialTheme.colorScheme.onPrimary,
                     shape = CircleShape,
                     modifier = Modifier
-                        .navigationBarsPadding()
-                        .padding(bottom = 16.dp, end = 16.dp)
+                        .padding(bottom = bottomPadding, end = 16.dp)
                 ) {
                     Icon(imageVector = Icons.Default.Add, contentDescription = "Add Download Link")
                 }
@@ -1742,6 +1797,7 @@ fun DownloadManagerDialog(
         }
 
     }
+}
 }
 
 // 1DM style individual download list item (Screenshot 2 Details)
