@@ -39,6 +39,9 @@ object DownloadEngine {
     fun startDownload(context: Context, itemId: Long, scope: CoroutineScope? = null) {
         if (activeJobs.containsKey(itemId)) return // already running
 
+        // Cancel previous notifications for this itemId if any
+        DownloadForegroundService.cancelDownloadNotification(context, itemId)
+
         // Start the Foreground service
         try {
             val serviceIntent = android.content.Intent(context, DownloadForegroundService::class.java).apply {
@@ -143,11 +146,13 @@ object DownloadEngine {
                 e.printStackTrace()
                 val currentItem = repo.getDownloadById(itemId)
                 if (currentItem != null && currentItem.status == "DOWNLOADING") {
-                    repo.updateDownload(currentItem.copy(
+                    val failedItem = currentItem.copy(
                         status = "ERROR",
                         downloadSpeed = "Failed",
                         eta = "Error: ${e.localizedMessage ?: "Network error"}"
-                    ))
+                    )
+                    repo.updateDownload(failedItem)
+                    appContext?.let { DownloadForegroundService.showFailedNotification(it, failedItem) }
                 }
             } finally {
                 activeJobs.remove(itemId)
@@ -350,15 +355,15 @@ object DownloadEngine {
                 // Complete Download!
                 val finalItemState = repo.getDownloadById(item.id)
                 if (finalItemState != null) {
-                    repo.updateDownload(
-                        finalItemState.copy(
-                            bytesDownloaded = totalLength,
-                            progress = 100f,
-                            status = "FINISHED",
-                            downloadSpeed = "Completed",
-                            eta = "--"
-                        )
+                    val completedItem = finalItemState.copy(
+                        bytesDownloaded = totalLength,
+                        progress = 100f,
+                        status = "FINISHED",
+                        downloadSpeed = "Completed",
+                        eta = "--"
                     )
+                    repo.updateDownload(completedItem)
+                    appContext?.let { DownloadForegroundService.showCompletedNotification(it, completedItem) }
                 }
                 appContext?.let { triggerNextDownload(it) }
             } else {
@@ -521,15 +526,15 @@ object DownloadEngine {
         if (isActive) {
             val finalItemState = repo.getDownloadById(item.id)
             if (finalItemState != null && finalItemState.status == "DOWNLOADING") {
-                repo.updateDownload(
-                    finalItemState.copy(
-                        bytesDownloaded = totalDownloaded,
-                        progress = 100f,
-                        status = "FINISHED",
-                        downloadSpeed = "Completed",
-                        eta = "--"
-                    )
+                val completedItem = finalItemState.copy(
+                    bytesDownloaded = totalDownloaded,
+                    progress = 100f,
+                    status = "FINISHED",
+                    downloadSpeed = "Completed",
+                    eta = "--"
                 )
+                repo.updateDownload(completedItem)
+                appContext?.let { DownloadForegroundService.showCompletedNotification(it, completedItem) }
             }
             appContext?.let { triggerNextDownload(it) }
         }
@@ -545,11 +550,13 @@ object DownloadEngine {
             val repo = repository ?: return@launch
             val item = repo.getDownloadById(itemId)
             if (item != null) {
-                repo.updateDownload(item.copy(
+                val pausedItem = item.copy(
                     status = "PAUSED",
                     downloadSpeed = "Paused",
                     eta = "--"
-                ))
+                )
+                repo.updateDownload(pausedItem)
+                appContext?.let { DownloadForegroundService.showPausedNotification(it, pausedItem) }
             }
             appContext?.let { triggerNextDownload(it) }
         }

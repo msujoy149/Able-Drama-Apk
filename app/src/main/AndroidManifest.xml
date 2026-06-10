@@ -34,6 +34,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".DownloadManagerActivity"
+            android:launchMode="singleTop"
+            android:exported="true"
+            android:label="Download Manager"
+            android:theme="@style/Theme.MyApplication" />
         <service
             android:name="com.example.util.DownloadForegroundService"
             android:foregroundServiceType="dataSync"

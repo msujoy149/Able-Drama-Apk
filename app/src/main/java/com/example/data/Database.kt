@@ -1,5 +1,6 @@
 package com.example.data
 
+import android.content.Context
 import androidx.room.*
 import kotlinx.coroutines.flow.Flow
 
@@ -122,5 +123,22 @@ interface DownloadDao {
 abstract class AppDatabase : RoomDatabase() {
     abstract fun browserDao(): BrowserDao
     abstract fun downloadDao(): DownloadDao
+
+    companion object {
+        @Volatile
+        private var INSTANCE: AppDatabase? = null
+
+        fun getDatabase(context: Context): AppDatabase {
+            return INSTANCE ?: synchronized(this) {
+                val instance = Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabase::class.java,
+                    "abledrama_db"
+                ).fallbackToDestructiveMigration(dropAllTables = true).build()
+                INSTANCE = instance
+                instance
+            }
+        }
+    }
 }
 

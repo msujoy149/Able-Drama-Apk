@@ -117,10 +117,8 @@ class MainActivity : ComponentActivity() {
     private var browserViewModel: BrowserViewModel? = null
 
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var lastProcessedClipText: String? = null
     private var isActivityResumed = false
-    private var lastRedirectTime: Long = 0
-    private var isInitialCaptureDone = false
+    private var lastFocusTime: Long = 0
 
     private val checkClipboardRunnable = Runnable {
         checkClipboardAndRedirect()
@@ -135,20 +133,22 @@ class MainActivity : ComponentActivity() {
         if (!isActivityResumed || !hasWindowFocus()) return
         if (!isAbleDramaActive) return
         
+        val timeSinceFocus = System.currentTimeMillis() - lastFocusTime
+        if (timeSinceFocus < 500) {
+            android.util.Log.d("ClipboardRedirection", "Ignoring clipboard check because time since focus/resume ($timeSinceFocus ms) is less than 500ms")
+            return
+        }
+        
         try {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
             if (!clipboard.hasPrimaryClip()) {
-                isInitialCaptureDone = true
                 return
             }
             val clipData = try {
                 clipboard.primaryClip
             } catch (t: Throwable) {
                 null
-            } ?: run {
-                isInitialCaptureDone = true
-                return
-            }
+            } ?: return
             
             if (clipData.itemCount > 0) {
                 val firstItem = try {
@@ -160,30 +160,12 @@ class MainActivity : ComponentActivity() {
                 if (!copiedText.isNullOrEmpty()) {
                     val urlCandidate = extractUrl(copiedText)
                     if (urlCandidate != null) {
-                        if (!isInitialCaptureDone) {
-                            // First successful clipboard access: quietly capture pre-existing text so we do not redirect
-                            lastProcessedClipText = urlCandidate
-                            isInitialCaptureDone = true
-                            android.util.Log.d("ClipboardRedirection", "Initial clipboard captured: $urlCandidate (No redirect)")
-                            return
-                        }
-                        if (urlCandidate != lastProcessedClipText) {
-                            lastProcessedClipText = urlCandidate
-                            android.util.Log.d("ClipboardRedirection", "Redirecting internally to URL: $urlCandidate")
-                            Toast.makeText(this@MainActivity, "Opening copied link...", Toast.LENGTH_SHORT).show()
-                            browserViewModel?.loadUrl(urlCandidate)
-                            browserViewModel?.triggerOpenBrowser()
-                        }
-                    } else {
-                        // Plain text should NOT cause redirect, and we don't interfere with the isInitialCaptureDone flag.
-                        // Setting isInitialCaptureDone = true ensures from here on, any valid URL will trigger redirect.
-                        isInitialCaptureDone = true
+                        android.util.Log.d("ClipboardRedirection", "Redirecting internally to URL: $urlCandidate")
+                        Toast.makeText(this@MainActivity, "Opening copied link...", Toast.LENGTH_SHORT).show()
+                        browserViewModel?.loadUrl(urlCandidate)
+                        browserViewModel?.triggerOpenBrowser()
                     }
-                } else {
-                    isInitialCaptureDone = true
                 }
-            } else {
-                isInitialCaptureDone = true
             }
         } catch (t: Throwable) {
             android.util.Log.e("ClipboardSafe", "Exception in clipboard check redirection", t)
@@ -237,7 +219,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         isActivityResumed = true
-        isInitialCaptureDone = false
+        lastFocusTime = System.currentTimeMillis()
         try {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             clipboard?.addPrimaryClipChangedListener(clipboardListener)
@@ -261,7 +243,7 @@ class MainActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
-            isInitialCaptureDone = false
+            lastFocusTime = System.currentTimeMillis()
             handler.removeCallbacks(checkClipboardRunnable)
             handler.postDelayed(checkClipboardRunnable, 100)
         }
@@ -272,11 +254,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         // Build Local Room database instance
-        val db = Room.databaseBuilder(
-            applicationContext,
-            AppDatabase::class.java,
-            "abledrama_db"
-        ).fallbackToDestructiveMigration(dropAllTables = true).build()
+        val db = AppDatabase.getDatabase(applicationContext)
 
         val repository = BrowserRepository(db.browserDao())
         val downloadRepository = DownloadRepository(db.downloadDao())

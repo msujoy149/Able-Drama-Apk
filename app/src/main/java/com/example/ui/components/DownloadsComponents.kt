@@ -671,13 +671,14 @@ fun DownloadFileDialog(
 fun DownloadManagerDialog(
     onDismissRequest: () -> Unit,
     downloadRepository: DownloadRepository,
-    coroutineScope: CoroutineScope
+    coroutineScope: CoroutineScope,
+    initialTab: Int = 0
 ) {
     val context = LocalContext.current
     val allDownloads by downloadRepository.allDownloads.collectAsStateWithLifecycle(initialValue = emptyList())
 
     // Tabs definition matching screenshot 1DM
-    var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedTab by remember { mutableIntStateOf(initialTab) }
     val tabsList = listOf("ALL", "DOWNLOADING", "FINISHED", "ERROR")
 
     val sharedPrefs = remember { context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE) }

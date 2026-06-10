@@ -10,6 +10,7 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
+import com.example.DownloadManagerActivity
 import com.example.data.DownloadItem
 import kotlinx.coroutines.*
 import java.io.File
@@ -28,6 +29,132 @@ class DownloadForegroundService : Service() {
         const val ACTION_PAUSE = "com.example.ACTION_PAUSE"
         const val ACTION_RESUME = "com.example.ACTION_RESUME"
         const val EXTRA_ITEM_ID = "EXTRA_ITEM_ID"
+
+        fun showCompletedNotification(context: Context, item: DownloadItem) {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            createNotificationChannelHelper(context)
+
+            val openAppIntent = Intent(context, DownloadManagerActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("EXTRA_TAB_INDEX", 2) // Completed (Finished) tab
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                item.id.toInt() + 3000,
+                openAppIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setContentTitle("Download Completed")
+                .setContentText(item.fileName)
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setAutoCancel(true)
+                .setOngoing(false)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setContentIntent(pendingIntent)
+
+            notificationManager.notify(item.id.toInt() + 10000, builder.build())
+        }
+
+        fun showFailedNotification(context: Context, item: DownloadItem) {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            createNotificationChannelHelper(context)
+
+            val openAppIntent = Intent(context, DownloadManagerActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("EXTRA_TAB_INDEX", 3) // Failed (Error) tab
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                item.id.toInt() + 4000,
+                openAppIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setContentTitle("Download Failed")
+                .setContentText(item.fileName)
+                .setSmallIcon(android.R.drawable.stat_notify_error)
+                .setAutoCancel(true)
+                .setOngoing(false)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setContentIntent(pendingIntent)
+
+            notificationManager.notify(item.id.toInt() + 20000, builder.build())
+        }
+
+        fun showPausedNotification(context: Context, item: DownloadItem) {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            createNotificationChannelHelper(context)
+
+            val openAppIntent = Intent(context, DownloadManagerActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("EXTRA_TAB_INDEX", 1) // Downloading / Pause tab
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                item.id.toInt() + 5000,
+                openAppIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val resumeIntent = Intent(context, DownloadForegroundService::class.java).apply {
+                action = ACTION_RESUME
+                putExtra(EXTRA_ITEM_ID, item.id)
+            }
+            val resumePendingIntent = PendingIntent.getService(
+                context,
+                item.id.toInt() + 6000,
+                resumeIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val progressInt = item.progress.toInt().coerceIn(0, 100)
+            val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setContentTitle("Download Paused")
+                .setContentText("${item.fileName} (${progressInt}%)")
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setProgress(100, progressInt, false)
+                .setAutoCancel(true)
+                .setOngoing(false)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setContentIntent(pendingIntent)
+                .addAction(
+                    android.R.drawable.ic_media_play,
+                    "Resume",
+                    resumePendingIntent
+                )
+
+            notificationManager.notify(item.id.toInt() + 30000, builder.build())
+        }
+
+        fun cancelDownloadNotification(context: Context, itemId: Long) {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            notificationManager.cancel(itemId.toInt() + 10000)
+            notificationManager.cancel(itemId.toInt() + 20000)
+            notificationManager.cancel(itemId.toInt() + 30000)
+        }
+
+        private fun createNotificationChannelHelper(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channelName = "Downloads"
+                val descriptionText = "Shows progress of current background downloads"
+                val importance = NotificationManager.IMPORTANCE_LOW
+                val channel = NotificationChannel(CHANNEL_ID, channelName, importance).apply {
+                    description = descriptionText
+                    setShowBadge(true)
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                    setSound(null, null)
+                    enableVibration(false)
+                }
+                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                notificationManager?.createNotificationChannel(channel)
+            }
+        }
     }
 
     override fun onCreate() {
@@ -189,13 +316,14 @@ class DownloadForegroundService : Service() {
         itemId: Long,
         isDownloading: Boolean
     ): Notification {
-        // Main tap intent to open MainActivity
-        val openAppIntent = Intent(this, MainActivity::class.java).apply {
+        // Main tap intent to open DownloadManagerActivity directly instead of MainActivity
+        val openAppIntent = Intent(this, DownloadManagerActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("EXTRA_TAB_INDEX", 1) // Opens Active Downloads tab
         }
         val mainPendingIntent = PendingIntent.getActivity(
             this,
-            0,
+            (itemId.toInt() + 8000).coerceAtLeast(8000),
             openAppIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -210,6 +338,7 @@ class DownloadForegroundService : Service() {
             .setContentIntent(mainPendingIntent)
             .setProgress(100, progress, isIndeterminate)
             .setAutoCancel(false)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
 
         // Add pause support
         if (isDownloading && itemId != -1L) {
@@ -257,7 +386,8 @@ class DownloadForegroundService : Service() {
             val importance = NotificationManager.IMPORTANCE_LOW
             val channel = NotificationChannel(CHANNEL_ID, channelName, importance).apply {
                 description = descriptionText
-                setShowBadge(false)
+                setShowBadge(true)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                 setSound(null, null)
                 enableVibration(false)
             }
