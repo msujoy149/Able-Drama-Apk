@@ -41,6 +41,7 @@ class DownloadManagerActivity : ComponentActivity() {
                         onDismissRequest = { finish() },
                         downloadRepository = downloadRepository,
                         coroutineScope = scope,
+                        onExitClick = { finish() },
                         initialTab = initialTab
                     )
                 }

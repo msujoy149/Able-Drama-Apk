@@ -38,6 +38,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.ui.BrowserViewModel
 import com.example.ui.WebViewCommand
+import com.example.ui.DetectedResource
 import kotlinx.coroutines.flow.collectLatest
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -101,6 +102,8 @@ fun AdvancedWebView(
                 setSupportZoom(true)
                 textZoom = 100
                 setSupportMultipleWindows(false)
+                loadsImagesAutomatically = true
+                offscreenPreRaster = true
             }
 
             // Custom Download listener to show 1DM style Downloader Dialog
@@ -137,6 +140,48 @@ fun AdvancedWebView(
 
     // Connect WebView controls back to view model status
     webView.webViewClient = object : WebViewClient() {
+        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): android.webkit.WebResourceResponse? {
+            val url = request?.url?.toString() ?: return null
+            val urlLower = url.lowercase()
+            
+            // Background smart detection of downloadable resource
+            val detected = detectMediaType(url)
+            if (detected != null) {
+                view?.post {
+                    viewModel.addDetectedResource(tabId, detected)
+                }
+            }
+            
+            val blockAdPattern = urlLower.contains("googleads") ||
+                    urlLower.contains("googlesyndication") ||
+                    urlLower.contains("doubleclick") ||
+                    urlLower.contains("google-analytics") ||
+                    urlLower.contains("googletagmanager") ||
+                    urlLower.contains("amung.us") ||
+                    urlLower.contains("histats") ||
+                    urlLower.contains("exoclick") ||
+                    urlLower.contains("addthis") ||
+                    urlLower.contains("popads") ||
+                    urlLower.contains("popcash") ||
+                    urlLower.contains("mgid") ||
+                    urlLower.contains("adskeeper") ||
+                    urlLower.contains("propellerads") ||
+                    urlLower.contains("onclickads") ||
+                    urlLower.contains("juicyads") ||
+                    urlLower.contains("zebid") ||
+                    urlLower.contains("adsystem") ||
+                    urlLower.contains("adnxs")
+            
+            if (blockAdPattern) {
+                return android.webkit.WebResourceResponse(
+                    "text/plain", 
+                    "UTF-8", 
+                    java.io.ByteArrayInputStream("".toByteArray())
+                )
+            }
+            return super.shouldInterceptRequest(view, request)
+        }
+
         private fun handleGoogleSearchInterception(view: WebView?, url: String): Boolean {
             try {
                 val uri = Uri.parse(url)
@@ -227,6 +272,7 @@ fun AdvancedWebView(
         }
 
         override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+            viewModel.clearDetectedResources(tabId)
             if (url != null) {
                 if (handleGoogleHomepageInterception(view, url)) {
                     view?.stopLoading()
@@ -274,7 +320,20 @@ fun AdvancedWebView(
             super.onPageFinished(view, url)
             viewModel.updateLoadingStatus(tabId, false, 100)
             if (view != null) {
+                extractPageResources(view, tabId, viewModel)
+                view.postDelayed({
+                    extractPageResources(view, tabId, viewModel)
+                }, 3000)
+                
                 applyBrowserLevelDarkTheme(view, isDarkTheme)
+                val adHideJs = "(function() {\n" +
+                        "  var style = document.createElement('style');\n" +
+                        "  style.type = 'text/css';\n" +
+                        "  style.id = 'able-ad-blocker-style';\n" +
+                        "  style.innerHTML = '.google-auto-placed, .adsbygoogle, #amungus, .histats, #histats, .ad-banner, .pop-ads, iframe[src*=\"googleads\"], iframe[src*=\"doubleclick\"] { display: none !important; opacity: 0 !important; height: 0 !important; width: 0 !important; pointer-events: none !important; }';\n" +
+                        "  document.head.appendChild(style);\n" +
+                        "})()"
+                view.evaluateJavascript(adHideJs, null)
             }
             if (url != null && view != null) {
                 view.evaluateJavascript(
@@ -487,4 +546,147 @@ internal fun applyBrowserLevelDarkTheme(webView: WebView, isDarkTheme: Boolean) 
             "  if (style) { style.parentNode.removeChild(style); }\n" +
             "})()"
     webView.evaluateJavascript(js, null)
+}
+
+fun detectMediaType(url: String): DetectedResource? {
+    val cleanUrl = url.substringBefore("?").lowercase()
+    val fullUrlLower = url.lowercase()
+    
+    // 1. Check explicit blacklisted extensions first (Images, Audio, Documents, Archives, General files)
+    val imageExtensions = listOf(".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico", ".tiff")
+    val audioExtensions = listOf(".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac", ".wma", ".opus", ".mka", ".m3u", ".m3u8_audio")
+    val docExtensions = listOf(".pdf", ".epub", ".docx", ".xlsx", ".pptx", ".txt", ".doc", ".xls", ".csv", ".rtf")
+    val archiveAndGeneralExtensions = listOf(".zip", ".rar", ".7z", ".apk", ".dmg", ".tar", ".gz", ".exe", ".bin", ".msi", ".iso", ".jar", ".json", ".xml", ".css", ".js")
+
+    val isExcluded = imageExtensions.any { cleanUrl.endsWith(it) } ||
+                     audioExtensions.any { cleanUrl.endsWith(it) } ||
+                     docExtensions.any { cleanUrl.endsWith(it) } ||
+                     archiveAndGeneralExtensions.any { cleanUrl.endsWith(it) } ||
+                     fullUrlLower.contains("audio_stream") || 
+                     fullUrlLower.contains("audioplayback")
+
+    if (isExcluded) {
+        return null
+    }
+
+    // 2. Identify Video extensions
+    val videoExtensions = listOf(".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".3gp", ".m4v", ".wmv", ".mpeg", ".ts", ".m3u8")
+    val isVideoExtension = videoExtensions.any { cleanUrl.endsWith(it) }
+
+    // 3. Identify Video Streams / CDN / Specific sites
+    val isVideoStream = fullUrlLower.contains("video_stream") || 
+                        fullUrlLower.contains("/videoplayback") || 
+                        fullUrlLower.contains("video-cdn") ||
+                        fullUrlLower.contains("googlevideo.com") ||
+                        fullUrlLower.contains(".m3u8") ||
+                        (fullUrlLower.contains("fbcdn.net") && (fullUrlLower.contains("/v/") || fullUrlLower.contains("_v_") || fullUrlLower.contains(".mp4"))) ||
+                        fullUrlLower.contains("tiktok.com") ||
+                        fullUrlLower.contains("doubleclick.net") ||
+                        (fullUrlLower.contains("/video/") && !cleanUrl.endsWith(".html") && !cleanUrl.endsWith(".php") && !cleanUrl.endsWith(".js") && !cleanUrl.endsWith(".css")) ||
+                        (fullUrlLower.contains("/embed/") && fullUrlLower.contains("video"))
+
+    if (!isVideoExtension && !isVideoStream) {
+        return null
+    }
+
+    // Determine target extension for download filename determination
+    val ext = videoExtensions.firstOrNull { cleanUrl.endsWith(it) } ?: "mp4"
+    val displayType = if (fullUrlLower.contains(".m3u8")) "HLS Playlist" else if (isVideoStream) "Video Stream" else "Video ${ext.uppercase()}"
+    
+    // Guess a meaningful title
+    var title = url.substringBefore("?").substringAfterLast("/").trim()
+    if (title.isBlank() || title.length < 3 || title.contains("videoplayback") || title.contains("video_stream")) {
+        title = "Video Media Resource"
+    }
+
+    // Extract potential quality hints from URL
+    var quality: String? = null
+    if (fullUrlLower.contains("1080p") || fullUrlLower.contains("1080")) quality = "1080p"
+    else if (fullUrlLower.contains("720p") || fullUrlLower.contains("720")) quality = "720p"
+    else if (fullUrlLower.contains("480p") || fullUrlLower.contains("480")) quality = "480p"
+    else if (fullUrlLower.contains("360p") || fullUrlLower.contains("360")) quality = "360p"
+    else if (fullUrlLower.contains("2160p") || fullUrlLower.contains("4k") || fullUrlLower.contains("2160")) quality = "4K"
+
+    return DetectedResource(
+        url = url,
+        title = title,
+        fileType = "Video",
+        quality = quality ?: displayType,
+        fileSize = 0L
+    )
+}
+
+fun extractPageResources(webView: WebView?, tabId: String, viewModel: BrowserViewModel) {
+    if (webView == null) return
+    val js = """
+        (function() {
+          var resources = [];
+          
+          // 1. Scan <video> elements only
+          var videos = document.querySelectorAll('video');
+          for (var i = 0; i < videos.length; i++) {
+            var v = videos[i];
+            if (v.src && v.src.indexOf('http') === 0) {
+              resources.push({ url: v.src, type: 'Video', title: 'Video Element' });
+            }
+            var sources = v.querySelectorAll('source');
+            for (var j = 0; j < sources.length; j++) {
+              var s = sources[j];
+              if (s.src && s.src.indexOf('http') === 0) {
+                resources.push({ url: s.src, type: 'Video', title: 'Video Stream Source' });
+              }
+            }
+          }
+          
+          // 2. Scan direct file anchors with video extensions only
+          var videoExtensions = ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.3gp', '.m4v', '.wmv', '.mpeg', '.m3u8'];
+          var anchors = document.querySelectorAll('a');
+          for (var i = 0; i < anchors.length; i++) {
+            var href = anchors[i].href;
+            if (href && href.indexOf('http') === 0) {
+              var cleanHref = href.toLowerCase().split('?')[0];
+              for (var k = 0; k < videoExtensions.length; k++) {
+                if (cleanHref.endsWith(videoExtensions[k])) {
+                  var linkTitle = anchors[i].innerText ? anchors[i].innerText.trim() : '';
+                  if (linkTitle.length > 60) linkTitle = linkTitle.substring(0, 57) + '...';
+                  resources.push({ url: href, type: 'Video', title: linkTitle || 'Video Link' });
+                  break;
+                }
+              }
+            }
+          }
+          
+          return JSON.stringify(resources);
+        })()
+    """.trimIndent()
+
+    webView.evaluateJavascript(js) { result ->
+        if (result != null && result != "null" && result.isNotBlank()) {
+            try {
+                val jsonStr = if (result.startsWith("\"") && result.endsWith("\"") && result.length >= 2) {
+                    val parser = org.json.JSONTokener(result)
+                    val value = parser.nextValue()
+                    value.toString()
+                } else {
+                    result
+                }
+                
+                val array = org.json.JSONArray(jsonStr)
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    val rawUrl = obj.getString("url")
+                    val rawTitle = obj.optString("title", "Video Resource")
+                    
+                    val detected = detectMediaType(rawUrl)?.copy(
+                        title = if (rawTitle.isNotBlank() && rawTitle != "Video Element" && rawTitle != "Video Stream Source") rawTitle else rawUrl.substringBefore("?").substringAfterLast("/").ifBlank { "Video Resource" }
+                    )
+                    if (detected != null) {
+                        viewModel.addDetectedResource(tabId, detected)
+                    }
+                }
+            } catch (e: Exception) {
+                // Ignore errors
+            }
+        }
+    }
 }

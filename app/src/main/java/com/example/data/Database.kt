@@ -23,6 +23,14 @@ data class HistoryItem(
     val thumbnailUrl: String? = null
 )
 
+@Entity(tableName = "search_history", indices = [Index(value = ["query"], unique = true)])
+data class SearchQueryHistory(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val query: String,
+    val timestamp: Long = System.currentTimeMillis(),
+    val useCount: Int = 1
+)
+
 @Entity(tableName = "downloads")
 data class DownloadItem(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -39,7 +47,15 @@ data class DownloadItem(
     val timestamp: Long = System.currentTimeMillis(),
     val useWebpageTitle: Boolean = true,
     val wifiOnly: Boolean = false,
-    val retryOnFail: Boolean = true
+    val retryOnFail: Boolean = true,
+    
+    // Recovery / Advanced download attributes
+    val originalUrl: String = "",
+    val referrerUrl: String = "",
+    val downloadHeaders: String = "",
+    val cookies: String = "",
+    val resumeMetadata: String = "",
+    val fileHash: String = ""
 )
 
 @Dao
@@ -96,12 +112,34 @@ interface BrowserDao {
 
     @Query("DELETE FROM history WHERE isBrowser = 1")
     suspend fun clearBrowserHistory()
+
+    // Search Query History
+    @Query("SELECT * FROM search_history ORDER BY useCount DESC, timestamp DESC")
+    fun getAllSearchHistory(): Flow<List<SearchQueryHistory>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSearchQuery(item: SearchQueryHistory)
+
+    @Query("SELECT * FROM search_history WHERE `query` = :query LIMIT 1")
+    suspend fun getSearchQueryItem(query: String): SearchQueryHistory?
+
+    @Query("DELETE FROM search_history WHERE id = :id")
+    suspend fun deleteSearchQueryById(id: Int)
+
+    @Query("DELETE FROM search_history WHERE `query` = :query")
+    suspend fun deleteSearchQueryText(query: String)
+
+    @Query("DELETE FROM search_history")
+    suspend fun clearSearchQueryHistory()
 }
 
 @Dao
 interface DownloadDao {
     @Query("SELECT * FROM downloads ORDER BY timestamp DESC")
     fun getAllDownloads(): Flow<List<DownloadItem>>
+
+    @Query("SELECT * FROM downloads WHERE status = 'DOWNLOADING'")
+    suspend fun getActiveDownloadsDirect(): List<DownloadItem>
 
     @Query("SELECT * FROM downloads WHERE id = :id")
     suspend fun getDownloadById(id: Long): DownloadItem?
@@ -119,7 +157,7 @@ interface DownloadDao {
     suspend fun deleteDownloadById(id: Long)
 }
 
-@Database(entities = [Bookmark::class, HistoryItem::class, DownloadItem::class], version = 4, exportSchema = false)
+@Database(entities = [Bookmark::class, HistoryItem::class, DownloadItem::class, SearchQueryHistory::class], version = 6, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun browserDao(): BrowserDao
     abstract fun downloadDao(): DownloadDao

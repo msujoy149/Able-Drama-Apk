@@ -56,10 +56,39 @@ class BrowserRepository(private val dao: BrowserDao) {
             dao.clearHistory()
         }
     }
+
+    // Search query history
+    val searchHistory: Flow<List<SearchQueryHistory>> = dao.getAllSearchHistory()
+
+    suspend fun addSearchQuery(query: String) {
+        val trimmed = query.trim()
+        if (trimmed.isNotBlank()) {
+            val existing = dao.getSearchQueryItem(trimmed)
+            if (existing != null) {
+                dao.insertSearchQuery(existing.copy(useCount = existing.useCount + 1, timestamp = System.currentTimeMillis()))
+            } else {
+                dao.insertSearchQuery(SearchQueryHistory(query = trimmed, timestamp = System.currentTimeMillis(), useCount = 1))
+            }
+        }
+    }
+
+    suspend fun deleteSearchQuery(id: Int) {
+        dao.deleteSearchQueryById(id)
+    }
+
+    suspend fun deleteSearchQueryText(query: String) {
+        dao.deleteSearchQueryText(query)
+    }
+
+    suspend fun clearSearchQueryHistory() {
+        dao.clearSearchQueryHistory()
+    }
 }
 
 class DownloadRepository(private val dao: DownloadDao) {
     val allDownloads: Flow<List<DownloadItem>> = dao.getAllDownloads()
+
+    suspend fun getActiveDownloadsDirect(): List<DownloadItem> = dao.getActiveDownloadsDirect()
 
     suspend fun getDownloadById(id: Long): DownloadItem? = dao.getDownloadById(id)
 

@@ -12,6 +12,13 @@
     <attribution
         android:tag="default"
         android:label="@string/app_name" />
+    <attribution
+        android:tag="audio"
+        android:label="@string/app_name" />
+    <attribution
+        android:tag="video"
+        android:label="@string/app_name" />
+
 
     <application
         android:allowBackup="true"

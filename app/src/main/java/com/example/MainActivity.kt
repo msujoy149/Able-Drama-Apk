@@ -56,6 +56,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.zIndex
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.Spring
@@ -75,6 +77,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -116,63 +121,84 @@ class MainActivity : ComponentActivity() {
     private var fullscreenContainer: FrameLayout? = null
     private var browserViewModel: BrowserViewModel? = null
 
-    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var isActivityResumed = false
-    private var lastFocusTime: Long = 0
+    // Clean, robust, lifecycle-aware element responsible for background/active clipboard change redirects
+    class ClipboardObserver(
+        private val activity: MainActivity,
+        private val onClipboardChanged: (String) -> Unit
+    ) : LifecycleEventObserver {
+        private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        private var isResumed = false
 
-    private val checkClipboardRunnable = Runnable {
-        checkClipboardAndRedirect()
-    }
+        private val checkClipboardRunnable = Runnable { checkClipboard() }
 
-    private val clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
-        handler.removeCallbacks(checkClipboardRunnable)
-        handler.postDelayed(checkClipboardRunnable, 80)
-    }
-
-    private fun checkClipboardAndRedirect() {
-        if (!isActivityResumed || !hasWindowFocus()) return
-        if (!isAbleDramaActive) return
-        
-        val timeSinceFocus = System.currentTimeMillis() - lastFocusTime
-        if (timeSinceFocus < 500) {
-            android.util.Log.d("ClipboardRedirection", "Ignoring clipboard check because time since focus/resume ($timeSinceFocus ms) is less than 500ms")
-            return
+        private val listener = ClipboardManager.OnPrimaryClipChangedListener {
+            handler.removeCallbacks(checkClipboardRunnable)
+            handler.postDelayed(checkClipboardRunnable, 80)
         }
-        
-        try {
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
-            if (!clipboard.hasPrimaryClip()) {
-                return
-            }
-            val clipData = try {
-                clipboard.primaryClip
-            } catch (t: Throwable) {
-                null
-            } ?: return
-            
-            if (clipData.itemCount > 0) {
-                val firstItem = try {
-                    clipData.getItemAt(0)
-                } catch (t: Throwable) {
-                    null
-                }
-                val copiedText = firstItem?.text?.toString()?.trim()
-                if (!copiedText.isNullOrEmpty()) {
-                    val urlCandidate = extractUrl(copiedText)
-                    if (urlCandidate != null) {
-                        android.util.Log.d("ClipboardRedirection", "Redirecting internally to URL: $urlCandidate")
-                        Toast.makeText(this@MainActivity, "Opening copied link...", Toast.LENGTH_SHORT).show()
-                        browserViewModel?.loadUrl(urlCandidate)
-                        browserViewModel?.triggerOpenBrowser()
+
+        override fun onStateChanged(source: LifecycleOwner, event: Lifecycle.Event) {
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    isResumed = true
+                    try {
+                        val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        clipboard?.addPrimaryClipChangedListener(listener)
+                    } catch (t: Throwable) {
+                        android.util.Log.e("ClipboardObserver", "Failed to add primary clip listener", t)
                     }
                 }
+                Lifecycle.Event.ON_PAUSE -> {
+                    isResumed = false
+                    try {
+                        val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        clipboard?.removePrimaryClipChangedListener(listener)
+                        handler.removeCallbacks(checkClipboardRunnable)
+                    } catch (t: Throwable) {
+                        android.util.Log.e("ClipboardObserver", "Failed to remove primary clip listener", t)
+                    }
+                }
+                Lifecycle.Event.ON_DESTROY -> {
+                    handler.removeCallbacks(checkClipboardRunnable)
+                    source.lifecycle.removeObserver(this)
+                }
+                else -> {}
             }
-        } catch (t: Throwable) {
-            android.util.Log.e("ClipboardSafe", "Exception in clipboard check redirection", t)
+        }
+
+        private fun checkClipboard() {
+            if (!isResumed) return
+            if (!MainActivity.isAbleDramaActive) return
+
+            try {
+                val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+                if (!clipboard.hasPrimaryClip()) return
+                val clipData = try {
+                    clipboard.primaryClip
+                } catch (t: Throwable) {
+                    null
+                } ?: return
+
+                if (clipData.itemCount > 0) {
+                    val firstItem = try {
+                        clipData.getItemAt(0)
+                    } catch (t: Throwable) {
+                        null
+                    }
+                    val copiedText = firstItem?.text?.toString()?.trim()
+                    if (!copiedText.isNullOrEmpty()) {
+                        val urlCandidate = activity.extractUrl(copiedText)
+                        if (urlCandidate != null) {
+                            onClipboardChanged(urlCandidate)
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                android.util.Log.e("ClipboardObserver", "Error in clipboard check", t)
+            }
         }
     }
 
-    private fun extractUrl(text: String): String? {
+    fun extractUrl(text: String): String? {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return null
 
@@ -216,42 +242,23 @@ class MainActivity : ComponentActivity() {
         return null
     }
 
-    override fun onResume() {
-        super.onResume()
-        isActivityResumed = true
-        lastFocusTime = System.currentTimeMillis()
-        try {
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-            clipboard?.addPrimaryClipChangedListener(clipboardListener)
-        } catch (t: Throwable) {
-            android.util.Log.e("ClipboardSafe", "Failed to add clipboard listener safely", t)
-        }
-    }
-
-    override fun onPause() {
-        super.onPause()
-        isActivityResumed = false
-        try {
-            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-            clipboard?.removePrimaryClipChangedListener(clipboardListener)
-            handler.removeCallbacks(checkClipboardRunnable)
-        } catch (t: Throwable) {
-            android.util.Log.e("ClipboardSafe", "Failed to remove clipboard listener safely", t)
-        }
-    }
-
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
-            lastFocusTime = System.currentTimeMillis()
-            handler.removeCallbacks(checkClipboardRunnable)
-            handler.postDelayed(checkClipboardRunnable, 100)
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Pre-create WebView cache/code cache directories to prevent Chromium readdir/file info errors
+        try {
+            val webViewCacheJs = java.io.File(applicationContext.cacheDir, "WebView/Default/HTTP Cache/Code Cache/js")
+            if (!webViewCacheJs.exists()) {
+                webViewCacheJs.mkdirs()
+            }
+            val webViewCacheWasm = java.io.File(applicationContext.cacheDir, "WebView/Default/HTTP Cache/Code Cache/wasm")
+            if (!webViewCacheWasm.exists()) {
+                webViewCacheWasm.mkdirs()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to pre-create WebView cache directories", e)
+        }
 
         // Build Local Room database instance
         val db = AppDatabase.getDatabase(applicationContext)
@@ -262,8 +269,18 @@ class MainActivity : ComponentActivity() {
         val networkMonitor = NetworkMonitor(applicationContext)
 
         // Pre-create/retrieve the BrowserViewModel so that the Activity can access it for clipboard redirection
-        val viewModelFactory = BrowserViewModelFactory(repository)
+        val viewModelFactory = BrowserViewModelFactory(repository, applicationContext)
         browserViewModel = androidx.lifecycle.ViewModelProvider(this, viewModelFactory)[BrowserViewModel::class.java]
+
+        // Register our specialized lifecycle-aware ClipboardObserver for redirection
+        lifecycle.addObserver(ClipboardObserver(this) { urlCandidate ->
+            android.util.Log.d("ClipboardRedirection", "Redirecting internally to URL: $urlCandidate")
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, "Opening copied link...", Toast.LENGTH_SHORT).show()
+                browserViewModel?.openUrlInBrowser(urlCandidate)
+                browserViewModel?.triggerOpenBrowser()
+            }
+        })
 
         setContent {
             val context = LocalContext.current
@@ -439,7 +456,16 @@ data class NavigationHistoryEntry(
     val url: String = "",
     val showDownloadManagerDialog: Boolean = false,
     val showBrowserHistoryDialog: Boolean = false,
-    val showAboutBrowserDialog: Boolean = false
+    val showAboutBrowserDialog: Boolean = false,
+    val isDramaModeActive: Boolean = true
+)
+
+data class AbleDramaSavedState(
+    val url: String,
+    val title: String,
+    val isPost: Boolean,
+    val isCategory: Boolean,
+    val isHome: Boolean
 )
 
 enum class BottomNavItem {
@@ -465,6 +491,9 @@ fun MainAppContent(
 
     // Navigation and history state list
     val navHistory = remember { mutableStateListOf<NavigationHistoryEntry>() }
+    val dramaSaveStack = remember { mutableStateListOf<AbleDramaSavedState>() }
+    var lastDramaUrl by remember { mutableStateOf("https://www.abledrama.top") }
+    var lastDramaTitle by remember { mutableStateOf("Able Drama") }
 
     // Collect app states dynamically
     var currentTab by remember { mutableStateOf(AppTab.BROWSER) }
@@ -487,6 +516,11 @@ fun MainAppContent(
     val browserHistory by viewModel.browserHistory.collectAsStateWithLifecycle()
     val tabsList by viewModel.tabs.collectAsStateWithLifecycle()
     val selectedTabId by viewModel.selectedTabId.collectAsStateWithLifecycle()
+    val isDramaModeActive by viewModel.isDramaModeActive.collectAsStateWithLifecycle()
+    val browserTabsList by viewModel.browserTabs.collectAsStateWithLifecycle()
+    val browserSelectedTabId by viewModel.browserSelectedTabId.collectAsStateWithLifecycle()
+    val dramaTabsList by viewModel.dramaTabs.collectAsStateWithLifecycle()
+    val dramaSelectedTabId by viewModel.dramaSelectedTabId.collectAsStateWithLifecycle()
     val requestSearchFocus by viewModel.requestSearchFocus.collectAsStateWithLifecycle()
     val urlBarFocusRequester = remember { FocusRequester() }
 
@@ -499,11 +533,14 @@ fun MainAppContent(
 
     var showDownloadFileDialog by remember { mutableStateOf(false) }
     var downloadPendingUrl by remember { mutableStateOf("") }
+    var downloadPendingName by remember { mutableStateOf("") }
     var showDownloadManagerDialog by remember { mutableStateOf(false) }
     var showBrowserHistoryDialog by remember { mutableStateOf(false) }
     var showAboutBrowserDialog by remember { mutableStateOf(false) }
     var showTelegramDialog by remember { mutableStateOf(false) }
     var showExitDialog by remember { mutableStateOf(false) }
+    val currentDetectedResources by viewModel.currentDetectedResources.collectAsStateWithLifecycle()
+    var showDetectedResourcesSheet by remember { mutableStateOf(false) }
 
     fun pushToHistory() {
         val entry = NavigationHistoryEntry(
@@ -511,7 +548,8 @@ fun MainAppContent(
             url = currentUrl,
             showDownloadManagerDialog = showDownloadManagerDialog,
             showBrowserHistoryDialog = showBrowserHistoryDialog,
-            showAboutBrowserDialog = showAboutBrowserDialog
+            showAboutBrowserDialog = showAboutBrowserDialog,
+            isDramaModeActive = viewModel.isDramaModeActive.value
         )
         val last = navHistory.lastOrNull()
         if (last == null || last != entry) {
@@ -525,17 +563,64 @@ fun MainAppContent(
             val entry = navHistory.removeAt(navHistory.size - 1)
             android.util.Log.d("NavHistory", "Popping state; stack size: ${navHistory.size}, restoring entry: $entry")
             
-            currentTab = entry.tab
+            // If the popped or restored state is Drama mode, force AppTab.BROWSER to completely bypass Main Menu
+            if (entry.isDramaModeActive) {
+                currentTab = AppTab.BROWSER
+                viewModel.setDramaModeActive(true)
+                showUrlBar = false
+                
+                val restoredState = if (dramaSaveStack.isNotEmpty()) {
+                    dramaSaveStack.removeAt(dramaSaveStack.size - 1)
+                } else {
+                    null
+                }
+                
+                val targetUrl = restoredState?.url ?: entry.url.ifEmpty { lastDramaUrl }
+                if (targetUrl.isNotEmpty() && targetUrl != currentUrl) {
+                    viewModel.loadUrl(targetUrl)
+                }
+            } else {
+                currentTab = entry.tab
+                viewModel.setDramaModeActive(entry.isDramaModeActive)
+                if (entry.tab == AppTab.BROWSER && entry.url.isNotEmpty() && entry.url != currentUrl) {
+                    viewModel.loadUrl(entry.url)
+                }
+            }
+            
             showDownloadManagerDialog = entry.showDownloadManagerDialog
             showBrowserHistoryDialog = entry.showBrowserHistoryDialog
             showAboutBrowserDialog = entry.showAboutBrowserDialog
-            
-            if (entry.tab == AppTab.BROWSER && entry.url.isNotEmpty() && entry.url != currentUrl) {
-                viewModel.loadUrl(entry.url)
-            }
             return true
         }
         return false
+    }
+
+    fun exitAndBackToHome() {
+        val restoredState = if (dramaSaveStack.isNotEmpty()) {
+            dramaSaveStack.removeAt(dramaSaveStack.size - 1)
+        } else {
+            null
+        }
+        
+        android.util.Log.d("NavHistory", "Exit to home; restored drama state: $restoredState")
+        
+        // Enforce the Main Menu is completely bypassed on return
+        currentTab = AppTab.BROWSER
+        viewModel.setDramaModeActive(true)
+        showUrlBar = false
+        
+        // Clear all Main Menu entries from standard navigation history so back clicks bypass it too
+        navHistory.removeAll { it.tab == AppTab.ACCOUNT }
+        
+        // Return directly with zero reload and zero scroll resetting if it's already on that URL
+        val targetUrl = restoredState?.url ?: lastDramaUrl
+        if (targetUrl.isNotEmpty() && targetUrl != currentUrl) {
+            viewModel.loadUrl(targetUrl)
+        }
+        
+        showDownloadManagerDialog = false
+        showBrowserHistoryDialog = false
+        showAboutBrowserDialog = false
     }
 
     // Graceful back handling for all tabs, views, and overlays
@@ -595,10 +680,10 @@ fun MainAppContent(
     // Bookmark overlay state and auto-hide timer for post URLs
     var isBookmarkOverlayVisible by remember { mutableStateOf(false) }
     var bookmarkTimerTrigger by remember { mutableIntStateOf(0) }
-    val isCurrentUrlAPost = remember(currentUrl) { isPostUrl(currentUrl) }
+    val isCurrentUrlAPost = remember(currentUrl, isDramaModeActive) { isPostUrl(currentUrl) && isDramaModeActive }
 
-    LaunchedEffect(currentUrl) {
-        if (isPostUrl(currentUrl)) {
+    LaunchedEffect(currentUrl, isDramaModeActive) {
+        if (isDramaModeActive && isPostUrl(currentUrl)) {
             isBookmarkOverlayVisible = true
             bookmarkTimerTrigger++
         } else {
@@ -616,6 +701,9 @@ fun MainAppContent(
 
     LaunchedEffect(viewModel) {
         viewModel.openBrowserTrigger.collect {
+            if (viewModel.isDramaModeActive.value || currentTab == AppTab.ACCOUNT) {
+                pushToHistory()
+            }
             currentTab = AppTab.BROWSER
             showUrlBar = true
         }
@@ -643,18 +731,43 @@ fun MainAppContent(
         }
     }
 
-    // Keep bottom search bar in sync on web loads and auto-hide/show the URL bar like Google Chrome
+    // Keep bottom search bar in sync on web loads
     LaunchedEffect(currentUrl) {
         inputUrl = currentUrl
-        
-        val urlLower = currentUrl.trim().lowercase()
-        val isAbleDrama = urlLower.contains("abledrama.top") || urlLower.contains("ablesrama.top")
-        
-        if (isAbleDrama) {
-            showUrlBar = false
-        } else {
-            showUrlBar = true
+    }
+
+    // Sync last drama URL and title when in Drama Mode
+    LaunchedEffect(currentUrl, currentTitle, isDramaModeActive) {
+        if (isDramaModeActive) {
+            val u = currentUrl.trim()
+            if (u.isNotEmpty() && (u.contains("abledrama.top") || u.contains("ablesrama.top"))) {
+                lastDramaUrl = u
+                lastDramaTitle = currentTitle
+            }
         }
+    }
+
+    // Capture and save the exact Drama state before entering Able Browser
+    var prevDramaModeActive by remember { mutableStateOf(true) }
+    LaunchedEffect(isDramaModeActive) {
+        if (!isDramaModeActive && prevDramaModeActive) {
+            val u = lastDramaUrl
+            val isPost = isPostUrl(u)
+            val isCategory = u.contains("/search") || u.contains("/category/") || u.contains("/p/") || u.contains("/search/label/")
+            val isHome = !isPost && !isCategory
+            
+            val state = AbleDramaSavedState(
+                url = u,
+                title = lastDramaTitle,
+                isPost = isPost,
+                isCategory = isCategory,
+                isHome = isHome
+            )
+            dramaSaveStack.add(state)
+            android.util.Log.d("DramaSavedState", "Context-Aware Saved State before Browser: $state")
+        }
+        prevDramaModeActive = isDramaModeActive
+        showUrlBar = !isDramaModeActive
     }
 
     // Dynamic sync of highlighted tab depending on web page location
@@ -680,10 +793,11 @@ fun MainAppContent(
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             bottomBar = {
-                CustomBottomNavBar(
-                    selectedItem = selectedBottomItem,
-                    onItemSelected = { item ->
-                        when (item) {
+                if (currentTab != AppTab.BROWSER || isDramaModeActive) {
+                    CustomBottomNavBar(
+                        selectedItem = selectedBottomItem,
+                        onItemSelected = { item ->
+                            when (item) {
                             BottomNavItem.ACCOUNT -> {
                                 if (currentTab == AppTab.ACCOUNT) {
                                     // Tap Main Menu Again -> Close & Return to previous state
@@ -695,6 +809,7 @@ fun MainAppContent(
                             }
                             else -> {
                                 pushToHistory()
+                                viewModel.setDramaModeActive(true)
                                 currentTab = AppTab.BROWSER
                                 showUrlBar = false
                                 when (item) {
@@ -719,6 +834,7 @@ fun MainAppContent(
                         }
                     }
                 )
+                }
             }
         ) { paddingValues ->
             Box(
@@ -750,9 +866,10 @@ fun MainAppContent(
                         }
                     }
 
-                    if (currentTab == AppTab.BROWSER && showUrlBar) {
+                    if (currentTab == AppTab.BROWSER && showUrlBar && !isDramaModeActive) {
                         val webThemeColor by viewModel.webThemeColor.collectAsStateWithLifecycle()
                         BrowserToolbar(
+                            viewModel = viewModel,
                             currentUrl = currentUrl,
                             currentTitle = currentTitle,
                             canGoBack = canGoBack,
@@ -787,8 +904,7 @@ fun MainAppContent(
                                 isTabGridVisible = true
                             },
                             onExitBrowser = {
-                                currentTab = AppTab.ACCOUNT
-                                showUrlBar = false
+                                exitAndBackToHome()
                             },
                             onHistoryClick = {
                                 pushToHistory()
@@ -811,17 +927,58 @@ fun MainAppContent(
                     // Tab Content Render
                     Box(modifier = Modifier.weight(1f)) {
                         // Always keep AdvancedWebViews in composition to preserve state & receive commands instantly
+                        // 1. Able Drama WebViews (completely isolated container)
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .graphicsLayer {
-                                    alpha = if (currentTab == AppTab.BROWSER) 1f else 0f
-                                    translationX = if (currentTab == AppTab.BROWSER) 0f else 20000f
+                                    alpha = if (currentTab == AppTab.BROWSER && isDramaModeActive) 1f else 0f
+                                    translationX = if (currentTab == AppTab.BROWSER && isDramaModeActive) 0f else 20000f
                                 }
                         ) {
-                            tabsList.forEach { tab ->
+                            dramaTabsList.forEach { tab ->
                                 key(tab.id) {
-                                    val isThisTabVisible = currentTab == AppTab.BROWSER && selectedTabId == tab.id
+                                    val isThisTabVisible = currentTab == AppTab.BROWSER && isDramaModeActive && dramaSelectedTabId == tab.id
+                                    androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
+                                        AdvancedWebView(
+                                            viewModel = viewModel,
+                                            tabId = tab.id,
+                                            isVisible = isThisTabVisible,
+                                            isDarkTheme = isDarkTheme,
+                                            onShowCustomView = onShowCustomView,
+                                            onHideCustomView = onHideCustomView,
+                                            modifier = Modifier.fillMaxSize().testTag("movie_web_view_${tab.id}"),
+                                            onSingleTap = {
+                                                if (isCurrentUrlAPost) {
+                                                    isBookmarkOverlayVisible = !isBookmarkOverlayVisible
+                                                    if (isBookmarkOverlayVisible) {
+                                                        bookmarkTimerTrigger++
+                                                    }
+                                                }
+                                            },
+                                            onDownloadRequested = { url, contentDisposition, mimeType, contentLength ->
+                                                pushToHistory()
+                                                downloadPendingUrl = url
+                                                showDownloadFileDialog = true
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. Able Browser WebViews (completely isolated container)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    alpha = if (currentTab == AppTab.BROWSER && !isDramaModeActive) 1f else 0f
+                                    translationX = if (currentTab == AppTab.BROWSER && !isDramaModeActive) 0f else 20000f
+                                }
+                        ) {
+                            browserTabsList.forEach { tab ->
+                                key(tab.id) {
+                                    val isThisTabVisible = currentTab == AppTab.BROWSER && !isDramaModeActive && browserSelectedTabId == tab.id
                                     androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
                                         if (tab.url == "browser://home" || tab.url.isBlank()) {
                                             if (isThisTabVisible) {
@@ -840,6 +997,9 @@ fun MainAppContent(
                                                         pushToHistory()
                                                         showDownloadManagerDialog = true
                                                     },
+                                                    onExitClick = {
+                                                        exitAndBackToHome()
+                                                    },
                                                     modifier = Modifier.fillMaxSize()
                                                 )
                                             }
@@ -851,15 +1011,8 @@ fun MainAppContent(
                                                 isDarkTheme = isDarkTheme,
                                                 onShowCustomView = onShowCustomView,
                                                 onHideCustomView = onHideCustomView,
-                                                modifier = Modifier.fillMaxSize().testTag("movie_web_view_${tab.id}"),
-                                                onSingleTap = {
-                                                    if (isCurrentUrlAPost) {
-                                                        isBookmarkOverlayVisible = !isBookmarkOverlayVisible
-                                                        if (isBookmarkOverlayVisible) {
-                                                            bookmarkTimerTrigger++
-                                                        }
-                                                    }
-                                                },
+                                                modifier = Modifier.fillMaxSize().testTag("browser_web_view_${tab.id}"),
+                                                onSingleTap = {},
                                                 onDownloadRequested = { url, contentDisposition, mimeType, contentLength ->
                                                     pushToHistory()
                                                     downloadPendingUrl = url
@@ -870,6 +1023,17 @@ fun MainAppContent(
                                     }
                                 }
                             }
+                        }
+
+                        // Overlay container for back-compatibility overlay items
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    alpha = if (currentTab == AppTab.BROWSER) 1f else 0f
+                                    translationX = if (currentTab == AppTab.BROWSER) 0f else 20000f
+                                }
+                        ) {
 
                             // Floating Bookmark Icon on the right vertical edge overlay
                             androidx.compose.animation.AnimatedVisibility(
@@ -924,6 +1088,72 @@ fun MainAppContent(
                                     }
                                 }
                             }
+
+                            // Floating Download Button on the right-middle side of the screen
+                            androidx.compose.animation.AnimatedVisibility(
+                                visible = currentDetectedResources.isNotEmpty() && run {
+                                    val urlLower = currentUrl.lowercase().substringBefore("?")
+                                    val isNonVideoFile = urlLower.endsWith(".pdf") || 
+                                                         urlLower.endsWith(".epub") ||
+                                                         urlLower.endsWith(".docx") ||
+                                                         urlLower.endsWith(".xlsx") ||
+                                                         urlLower.endsWith(".txt") ||
+                                                         urlLower.endsWith(".doc") ||
+                                                         urlLower.endsWith(".xls") ||
+                                                         urlLower.endsWith(".jpg") || 
+                                                         urlLower.endsWith(".jpeg") || 
+                                                         urlLower.endsWith(".png") || 
+                                                         urlLower.endsWith(".gif") || 
+                                                         urlLower.endsWith(".webp") || 
+                                                         urlLower.endsWith(".mp3") || 
+                                                         urlLower.endsWith(".wav") || 
+                                                         urlLower.endsWith(".m4a") || 
+                                                         urlLower.endsWith(".aac") ||
+                                                         urlLower.endsWith(".zip") || 
+                                                         urlLower.endsWith(".rar") || 
+                                                         urlLower.endsWith(".apk")
+                                    !isNonVideoFile
+                                },
+                                enter = fadeIn() + scaleIn(),
+                                exit = fadeOut() + scaleOut(),
+                                modifier = Modifier
+                                    .align(Alignment.CenterEnd)
+                                    .offset(y = 80.dp)
+                                    .padding(end = 16.dp)
+                            ) {
+                                Card(
+                                    modifier = Modifier
+                                        .size(56.dp)
+                                        .clickable {
+                                            if (currentDetectedResources.size == 1) {
+                                                val res = currentDetectedResources.first()
+                                                downloadPendingUrl = res.url
+                                                downloadPendingName = res.title
+                                                showDownloadFileDialog = true
+                                            } else {
+                                                showDetectedResourcesSheet = true
+                                            }
+                                        }
+                                        .testTag("floating_download_resources_btn"),
+                                    shape = CircleShape,
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = Color(0xFFD0BCFF)
+                                    ),
+                                    elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.CloudUpload,
+                                            contentDescription = "Detected Downloads",
+                                            tint = Color(0xFF131317),
+                                            modifier = Modifier.size(28.dp)
+                                        )
+                                    }
+                                }
+                            }
                         }
 
                         androidx.compose.animation.AnimatedVisibility(
@@ -945,6 +1175,7 @@ fun MainAppContent(
                                 onToggleDarkTheme = onToggleDarkTheme,
                                 onSectionClick = { targetUrl ->
                                     pushToHistory()
+                                    viewModel.setDramaModeActive(true)
                                     viewModel.loadUrl(targetUrl)
                                     currentTab = AppTab.BROWSER
                                     showUrlBar = false
@@ -969,15 +1200,13 @@ fun MainAppContent(
                                 },
                                 onBrowserToggleClick = {
                                     pushToHistory()
-                                    viewModel.loadUrl("browser://home")
+                                    viewModel.openBrowserToHome()
                                     currentTab = AppTab.BROWSER
-                                    showUrlBar = false
                                 },
                                 onUrlPasteGoClick = { targetUrl ->
                                     pushToHistory()
-                                    viewModel.loadUrl(targetUrl)
+                                    viewModel.openUrlInBrowser(targetUrl)
                                     currentTab = AppTab.BROWSER
-                                    showUrlBar = true
                                 }
                             )
                         }
@@ -990,17 +1219,258 @@ fun MainAppContent(
         if (showDownloadFileDialog) {
             DownloadFileDialog(
                 initialUrl = downloadPendingUrl,
+                initialReferrerUrl = currentUrl,
+                initialFileName = downloadPendingName,
                 onDismissRequest = { showDownloadFileDialog = false },
                 downloadRepository = downloadRepository,
                 coroutineScope = coroutineScope
             )
         }
 
+        if (showDetectedResourcesSheet && currentDetectedResources.isNotEmpty()) {
+            Dialog(
+                onDismissRequest = { showDetectedResourcesSheet = false },
+                properties = DialogProperties(usePlatformDefaultWidth = false)
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp)
+                        .clip(RoundedCornerShape(20.dp)),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 6.dp
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp)
+                    ) {
+                        // Title row
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CloudUpload,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = if (currentDetectedResources.size == 1) "Single Media Detected" else "Detected Media (" + currentDetectedResources.size + ")",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            IconButton(onClick = { showDetectedResourcesSheet = false }) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Close",
+                                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f), modifier = Modifier.padding(vertical = 12.dp))
+
+                        if (currentDetectedResources.size == 1) {
+                            val res = currentDetectedResources.first()
+                            Text(
+                                text = "One downloadable resource has been detected on this page. Tap the card below to configure and start your download.",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                modifier = Modifier.padding(bottom = 12.dp)
+                            )
+                            
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        downloadPendingUrl = res.url
+                                        downloadPendingName = res.title
+                                        showDownloadFileDialog = true
+                                        showDetectedResourcesSheet = false
+                                    },
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(14.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = res.title,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = res.fileType.substringBefore("/") + " • " + (if (!res.quality.isNullOrBlank()) res.quality else "Standard"),
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            Text(
+                                text = "Multiple downloadable media links were found. Please select which item you wish to download:",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                modifier = Modifier.padding(bottom = 12.dp)
+                            )
+
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 280.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                items(currentDetectedResources) { res ->
+                                    val accentColor = when (res.fileType) {
+                                        "Video" -> Color(0xFFE50914)
+                                        "Audio" -> Color(0xFF2196F3)
+                                        "Document" -> Color(0xFF4CAF50)
+                                        else -> Color(0xFFFF9800)
+                                    }
+                                    Card(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                downloadPendingUrl = res.url
+                                                downloadPendingName = res.title
+                                                showDownloadFileDialog = true
+                                                showDetectedResourcesSheet = false
+                                            },
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                                        ),
+                                        shape = RoundedCornerShape(10.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(34.dp)
+                                                    .clip(CircleShape)
+                                                    .background(accentColor.copy(alpha = 0.12f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (res.fileType == "Video") Icons.Default.PlayArrow else Icons.Default.PlayArrow,
+                                                    contentDescription = null,
+                                                    tint = accentColor,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+
+                                            Spacer(modifier = Modifier.width(10.dp))
+
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = res.title,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    color = MaterialTheme.colorScheme.onSurface,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Spacer(modifier = Modifier.height(2.dp))
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    Surface(
+                                                        color = accentColor.copy(alpha = 0.08f),
+                                                        shape = RoundedCornerShape(4.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = res.fileType.substringBefore("/").uppercase(),
+                                                            fontSize = 9.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = accentColor,
+                                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                        )
+                                                    }
+                                                    if (!res.quality.isNullOrBlank()) {
+                                                        Surface(
+                                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                                                            shape = RoundedCornerShape(4.dp)
+                                                        ) {
+                                                            Text(
+                                                                text = res.quality,
+                                                                fontSize = 9.sp,
+                                                                fontWeight = FontWeight.Bold,
+                                                                color = MaterialTheme.colorScheme.primary,
+                                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            Spacer(modifier = Modifier.width(4.dp))
+
+                                            Icon(
+                                                imageVector = Icons.Default.Download,
+                                                contentDescription = "Download Item",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Bottom Actions Row
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            TextButton(
+                                onClick = { showDetectedResourcesSheet = false }
+                            ) {
+                                Text("CANCEL", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if (showDownloadManagerDialog) {
             DownloadManagerDialog(
                 onDismissRequest = { showDownloadManagerDialog = false },
                 downloadRepository = downloadRepository,
-                coroutineScope = coroutineScope
+                coroutineScope = coroutineScope,
+                onExitClick = {
+                    showDownloadManagerDialog = false
+                    exitAndBackToHome()
+                }
             )
         }
 
@@ -1045,6 +1515,10 @@ fun MainAppContent(
                 },
                 onClearAllHistory = {
                     viewModel.clearBrowserHistory()
+                },
+                onExitClick = {
+                    showBrowserHistoryDialog = false
+                    exitAndBackToHome()
                 }
             )
         }
@@ -1298,6 +1772,7 @@ fun OfflineAlertBanner() {
 
 @Composable
 fun BrowserToolbar(
+    viewModel: com.example.ui.BrowserViewModel,
     currentUrl: String,
     currentTitle: String,
     canGoBack: Boolean,
@@ -1400,12 +1875,13 @@ fun BrowserToolbar(
 
         val focusManager = LocalFocusManager.current
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 6.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
             if (!isEditing) {
                 // Home button (Leftmost, visible when not editing URL)
                 IconButton(
@@ -1493,6 +1969,7 @@ fun BrowserToolbar(
                         onValueChange = { newValue ->
                             if (isEditing) {
                                 editUrlText = newValue
+                                viewModel.updateSearchInput(newValue)
                             }
                         },
                         modifier = Modifier
@@ -1516,6 +1993,7 @@ fun BrowserToolbar(
                                     } else {
                                         editUrlText = currentUrl
                                     }
+                                    viewModel.updateSearchInput(editUrlText)
                                 }
                             }
                             .testTag("browser_url_input"),
@@ -1555,7 +2033,10 @@ fun BrowserToolbar(
 
                     if (isEditing && editUrlText.isNotEmpty()) {
                         IconButton(
-                            onClick = { editUrlText = "" },
+                            onClick = { 
+                                editUrlText = "" 
+                                viewModel.updateSearchInput("")
+                            },
                             modifier = Modifier.size(24.dp)
                         ) {
                             Icon(
@@ -1651,6 +2132,37 @@ fun BrowserToolbar(
                             }
                         )
                     }
+                }
+            }
+        }
+
+        if (isEditing) {
+                val suggestions by viewModel.searchSuggestions.collectAsStateWithLifecycle()
+                if (suggestions.isNotEmpty()) {
+                    var lastFilledText by remember { mutableStateOf("") }
+                    SearchSuggestionsDropdown(
+                        suggestions = suggestions,
+                        isDarkTheme = isDarkTheme,
+                        onSuggestionClick = { item ->
+                            if (editUrlText.trim().lowercase() == item.text.trim().lowercase() || item.text.trim().lowercase() == lastFilledText.trim().lowercase()) {
+                                onUrlSubmit(item.text)
+                                focusManager.clearFocus()
+                            } else {
+                                editUrlText = item.text
+                                lastFilledText = item.text
+                                viewModel.updateSearchInput(item.text)
+                            }
+                        },
+                        onDeleteSearchClick = { item ->
+                            viewModel.deleteSearchQuery(item.id)
+                        },
+                        onClearAllClick = {
+                            viewModel.clearSearchQueryHistory()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
                 }
             }
         }
@@ -4198,7 +4710,7 @@ fun BrowserActionMenuPopup(
 
                     BrowserMenuItem(
                         icon = Icons.Default.Close,
-                        label = "Exit Browser",
+                        label = "Exit & Back to Home",
                         testTag = "browser_menu_exit",
                         isDarkTheme = isDarkTheme,
                         onClick = {
@@ -4221,7 +4733,8 @@ fun BrowserHistoryBookmarksDialog(
     onUrlClick: (String) -> Unit,
     onDeleteBookmark: (String) -> Unit,
     onDeleteHistory: (Int) -> Unit,
-    onClearAllHistory: () -> Unit
+    onClearAllHistory: () -> Unit,
+    onExitClick: () -> Unit
 ) {
     var subTabState by remember { mutableStateOf(0) } // 0 = Bookmarks, 1 = History
     var searchQuery by remember { mutableStateOf("") }
@@ -4477,6 +4990,43 @@ fun BrowserHistoryBookmarksDialog(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Exit & Back to Home button at bottom of History & Bookmarks page
+            Button(
+                onClick = onExitClick,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                    .height(48.dp)
+                    .testTag("bookmarks_history_exit_button"),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isDarkTheme) CinemaGold else CinemaRed,
+                    contentColor = if (isDarkTheme) Color.Black else Color.White
+                ),
+                shape = RoundedCornerShape(24.dp),
+                elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Home,
+                        contentDescription = null,
+                        tint = if (isDarkTheme) Color.Black else Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Exit & Back to Home",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isDarkTheme) Color.Black else Color.White
+                    )
+                }
+            }
         }
     }
 }
@@ -4489,6 +5039,7 @@ fun BrowserHomepage(
     onHistoryClick: () -> Unit,
     onDownloadsClick: () -> Unit,
     isDarkTheme: Boolean,
+    onExitClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val isDark = isDarkTheme
@@ -4594,92 +5145,143 @@ fun BrowserHomepage(
         var searchText by remember { mutableStateOf("") }
         val homeFocusManager = androidx.compose.ui.platform.LocalFocusManager.current
         val centerFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+        var isSearchFocused by remember { mutableStateOf(false) }
 
-        // Large rounded search/address bar in center - Fully interactive textfield
-        Card(
+        val suggestions by viewModel.searchSuggestions.collectAsStateWithLifecycle()
+
+        // Large rounded search/address bar in center - Fully interactive textfield with dropdown suggestions
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(54.dp)
-                .clickable { centerFocusRequester.requestFocus() }
-                .testTag("homepage_center_search_bar"),
-            shape = RoundedCornerShape(27.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (isDark) Color(0xFF121217) else Color.White
-            ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-            border = BorderStroke(
-                width = 1.dp,
-                color = if (isDark) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
-            )
+                .zIndex(10f),
+            contentAlignment = Alignment.TopCenter
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 20.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Search,
-                    contentDescription = "Search",
-                    tint = if (isDark) CinemaGold else CinemaRed,
-                    modifier = Modifier.size(22.dp)
-                )
-
-                Spacer(modifier = Modifier.width(14.dp))
-
-                androidx.compose.foundation.text.BasicTextField(
-                    value = searchText,
-                    onValueChange = { searchText = it },
+            Column {
+                Card(
                     modifier = Modifier
-                        .weight(1f)
-                        .focusRequester(centerFocusRequester)
-                        .testTag("homepage_center_input"),
-                    textStyle = androidx.compose.ui.text.TextStyle(
-                        color = if (isDark) Color.White else Color(0xFF202124),
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .clickable { centerFocusRequester.requestFocus() }
+                        .testTag("homepage_center_search_bar"),
+                    shape = RoundedCornerShape(27.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isDark) Color(0xFF121217) else Color.White
                     ),
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Uri,
-                        imeAction = ImeAction.Go
-                    ),
-                    keyboardActions = KeyboardActions(
-                        onGo = {
-                            val target = searchText.trim()
-                            if (target.isNotEmpty()) {
-                                viewModel.loadUrl(target)
-                            }
-                            homeFocusManager.clearFocus()
-                        }
-                    ),
-                    decorationBox = { innerTextField ->
-                        Box(modifier = Modifier.fillMaxWidth()) {
-                            if (searchText.isEmpty()) {
-                                Text(
-                                    text = "Search or type URL",
-                                    color = if (isDark) Color.Gray else Color(0xFF5F6368),
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                            innerTextField()
-                        }
-                    }
-                )
-
-                if (searchText.isNotEmpty()) {
-                    IconButton(
-                        onClick = { searchText = "" },
-                        modifier = Modifier.size(24.dp)
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (isDark) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 20.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Clear search input",
-                            tint = if (isDark) Color.Gray else Color(0xFF5F6368),
-                            modifier = Modifier.size(16.dp)
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Search",
+                            tint = if (isDark) CinemaGold else CinemaRed,
+                            modifier = Modifier.size(22.dp)
                         )
+
+                        Spacer(modifier = Modifier.width(14.dp))
+
+                        androidx.compose.foundation.text.BasicTextField(
+                            value = searchText,
+                            onValueChange = { 
+                                searchText = it 
+                                viewModel.updateSearchInput(it)
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .focusRequester(centerFocusRequester)
+                                .onFocusChanged { focusState ->
+                                    isSearchFocused = focusState.isFocused
+                                    if (focusState.isFocused) {
+                                        viewModel.updateSearchInput(searchText)
+                                    }
+                                }
+                                .testTag("homepage_center_input"),
+                            textStyle = androidx.compose.ui.text.TextStyle(
+                                color = if (isDark) Color.White else Color(0xFF202124),
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium
+                            ),
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Uri,
+                                imeAction = ImeAction.Go
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onGo = {
+                                    val target = searchText.trim()
+                                    if (target.isNotEmpty()) {
+                                        viewModel.loadUrl(target)
+                                    }
+                                    homeFocusManager.clearFocus()
+                                }
+                            ),
+                            decorationBox = { innerTextField ->
+                                Box(modifier = Modifier.fillMaxWidth()) {
+                                    if (searchText.isEmpty()) {
+                                        Text(
+                                            text = "Search or type URL",
+                                            color = if (isDark) Color.Gray else Color(0xFF5F6368),
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
+                                    innerTextField()
+                                }
+                            }
+                        )
+
+                        if (searchText.isNotEmpty()) {
+                            IconButton(
+                                onClick = { 
+                                    searchText = "" 
+                                    viewModel.updateSearchInput("")
+                                },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Clear search input",
+                                    tint = if (isDark) Color.Gray else Color(0xFF5F6368),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
                     }
+                }
+
+                if (isSearchFocused && suggestions.isNotEmpty()) {
+                    var lastFilledText by remember { mutableStateOf("") }
+                    SearchSuggestionsDropdown(
+                        suggestions = suggestions,
+                        isDarkTheme = isDark,
+                        onSuggestionClick = { item ->
+                            if (searchText.trim().lowercase() == item.text.trim().lowercase() || item.text.trim().lowercase() == lastFilledText.trim().lowercase()) {
+                                viewModel.loadUrl(item.text)
+                                homeFocusManager.clearFocus()
+                            } else {
+                                searchText = item.text
+                                lastFilledText = item.text
+                                viewModel.updateSearchInput(item.text)
+                            }
+                        },
+                        onDeleteSearchClick = { item ->
+                            viewModel.deleteSearchQuery(item.id)
+                        },
+                        onClearAllClick = {
+                            viewModel.clearSearchQueryHistory()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp)
+                    )
                 }
             }
         }
@@ -4885,6 +5487,41 @@ fun BrowserHomepage(
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(28.dp))
+
+        Button(
+            onClick = onExitClick,
+            modifier = Modifier
+                .fillMaxWidth(0.9f)
+                .height(48.dp)
+                .testTag("exit_and_back_to_home_button"),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (isDark) CinemaGold else CinemaRed,
+                contentColor = if (isDark) Color.Black else Color.White
+            ),
+            shape = RoundedCornerShape(24.dp),
+            elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Home,
+                    contentDescription = null,
+                    tint = if (isDark) Color.Black else Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Exit & Back to Home",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isDark) Color.Black else Color.White
+                )
+            }
+        }
     } // closes Column
 } // closes else block
 }
@@ -5035,6 +5672,156 @@ fun AboutBrowserDialog(
                         text = "Dismiss",
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SearchSuggestionsDropdown(
+    suggestions: List<com.example.ui.SearchSuggestionItem>,
+    isDarkTheme: Boolean,
+    onSuggestionClick: (com.example.ui.SearchSuggestionItem) -> Unit,
+    onDeleteSearchClick: (com.example.ui.SearchSuggestionItem) -> Unit,
+    onClearAllClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (suggestions.isEmpty()) return
+
+    val cinemaGold = Color(0xFFFFB300)
+    val cinemaRed = Color(0xFFE50914)
+    val accentColor = if (isDarkTheme) cinemaGold else cinemaRed
+
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .wrapContentHeight()
+            .padding(horizontal = 4.dp, vertical = 2.dp)
+            .testTag("search_suggestions_panel"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isDarkTheme) Color(0xFF121217) else Color.White
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
+        )
+    ) {
+        Column(modifier = Modifier.padding(vertical = 8.dp)) {
+            androidx.compose.foundation.lazy.LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 280.dp),
+                verticalArrangement = Arrangement.spacedBy(1.dp)
+            ) {
+                items(suggestions.size) { index ->
+                    val item = suggestions[index]
+                    val isRecentSearch = item.type == com.example.ui.SuggestionType.HISTORY_SEARCH
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSuggestionClick(item) }
+                            .padding(horizontal = 16.dp, vertical = 11.dp)
+                            .testTag("suggestion_item_${index}"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val icon = when (item.type) {
+                            com.example.ui.SuggestionType.HISTORY_SEARCH -> Icons.Default.History
+                            com.example.ui.SuggestionType.RELATED_SUGGEST -> Icons.Default.Search
+                            com.example.ui.SuggestionType.BROWSER_HISTORY -> Icons.Default.Language
+                        }
+                        
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = "Suggestion Type",
+                            tint = if (isDarkTheme) Color.Gray else Color.Gray,
+                            modifier = Modifier.size(18.dp)
+                        )
+
+                        Spacer(modifier = Modifier.width(14.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = item.text,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (isDarkTheme) Color.White else Color(0xFF202124),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (!item.subText.isNullOrBlank() && item.subText != item.text) {
+                                Text(
+                                    text = item.subText,
+                                    fontSize = 11.sp,
+                                    color = if (isDarkTheme) Color.Gray else Color(0xFF5F6368),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(top = 1.dp)
+                                )
+                            }
+                        }
+
+                        if (isRecentSearch) {
+                            IconButton(
+                                onClick = { onDeleteSearchClick(item) },
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .testTag("delete_suggestion_item_${index}")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Remove Search Query",
+                                    tint = if (isDarkTheme) Color.Gray else Color.Gray,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            }
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.ArrowOutward,
+                                contentDescription = "Copy Suggestion",
+                                tint = if (isDarkTheme) Color.DarkGray else Color.LightGray,
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .alpha(0.6f)
+                            )
+                        }
+                    }
+                }
+            }
+
+            val hasHistorySearch = suggestions.any { it.type == com.example.ui.SuggestionType.HISTORY_SEARCH }
+            if (hasHistorySearch) {
+                HorizontalDivider(
+                    thickness = 0.5.dp,
+                    color = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFECEFF1),
+                    modifier = Modifier.padding(vertical = 4.dp)
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onClearAllClick() }
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .testTag("clear_all_search_history"),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Clear History",
+                        tint = accentColor.copy(alpha = 0.8f),
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Clear Search History",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = accentColor.copy(alpha = 0.8f)
                     )
                 }
             }

@@ -171,18 +171,23 @@ fun DownloadManagerTheme(content: @Composable () -> Unit) {
 @Composable
 fun DownloadFileDialog(
     initialUrl: String,
+    initialReferrerUrl: String = "",
+    initialFileName: String = "",
     onDismissRequest: () -> Unit,
     downloadRepository: DownloadRepository,
     coroutineScope: CoroutineScope
 ) {
     val context = LocalContext.current
     var url by remember { mutableStateOf(initialUrl) }
-    var referrerUrl by remember { mutableStateOf("") }
-    var fileName by remember { mutableStateOf(if (initialUrl.isNotBlank()) "loading_details..." else "") }
+    var referrerUrl by remember { mutableStateOf(initialReferrerUrl) }
+    var fileName by remember { mutableStateOf(if (initialFileName.isNotBlank()) initialFileName else if (initialUrl.isNotBlank()) "loading_details..." else "") }
     var fileExtension by remember { mutableStateOf("mp4") }
     var fileSize by remember { mutableLongStateOf(0L) }
     var isResumeSupported by remember { mutableStateOf(true) }
     var isProbing by remember { mutableStateOf(false) }
+    
+    var showConflictDialog by remember { mutableStateOf(false) }
+    var conflictActionType by remember { mutableStateOf("CONNECT") } // "ADD" or "CONNECT"
     
     val sharedPrefs = remember { context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE) }
     var storageMode by remember { mutableStateOf(sharedPrefs.getString("storage_mode", "public") ?: "public") }
@@ -647,25 +652,33 @@ fun DownloadFileDialog(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TextButton(onClick = {
-                        coroutineScope.launch {
-                            val safeName = if (fileName.isNotBlank()) "$fileName.$fileExtension" else "video_file.$fileExtension"
-                            val targetFile = File(defaultDir, safeName)
-                            val item = DownloadItem(
-                                url = url,
-                                fileName = safeName,
-                                filePath = targetFile.absolutePath,
-                                fileSize = fileSize,
-                                bytesDownloaded = 0L,
-                                isResumeSupported = isResumeSupported,
-                                status = "PAUSED",
-                                progress = 0f,
-                                useWebpageTitle = useWebpageTitle,
-                                wifiOnly = wifiOnly,
-                                retryOnFail = retryOnFail
-                            )
-                            downloadRepository.insertDownload(item)
-                            Toast.makeText(context, "Added to download queue (Paused)", Toast.LENGTH_SHORT).show()
-                            onDismissRequest()
+                        val safeName = if (fileName.isNotBlank()) "$fileName.$fileExtension" else "video_file.$fileExtension"
+                        val targetFile = File(defaultDir, safeName)
+                        if (targetFile.exists()) {
+                            conflictActionType = "ADD"
+                            showConflictDialog = true
+                        } else {
+                            coroutineScope.launch {
+                                val item = DownloadItem(
+                                    url = url,
+                                    fileName = safeName,
+                                    filePath = targetFile.absolutePath,
+                                    fileSize = fileSize,
+                                    bytesDownloaded = 0L,
+                                    isResumeSupported = isResumeSupported,
+                                    status = "PAUSED",
+                                    progress = 0f,
+                                    useWebpageTitle = useWebpageTitle,
+                                    wifiOnly = wifiOnly,
+                                    retryOnFail = retryOnFail,
+                                    originalUrl = url,
+                                    referrerUrl = referrerUrl,
+                                    cookies = try { android.webkit.CookieManager.getInstance().getCookie(url) ?: "" } catch (e: Exception) { "" }
+                                )
+                                downloadRepository.insertDownload(item)
+                                Toast.makeText(context, "Added to download queue (Paused)", Toast.LENGTH_SHORT).show()
+                                onDismissRequest()
+                            }
                         }
                     }) {
                         Text(text = "ADD", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
@@ -681,32 +694,189 @@ fun DownloadFileDialog(
 
                     TextButton(
                         onClick = {
-                            coroutineScope.launch {
-                                val safeName = if (fileName.isNotBlank()) "$fileName.$fileExtension" else "video_file.$fileExtension"
-                                val targetFile = File(defaultDir, safeName)
-                                val item = DownloadItem(
-                                    url = url,
-                                    fileName = safeName,
-                                    filePath = targetFile.absolutePath,
-                                    fileSize = fileSize,
-                                    bytesDownloaded = 0L,
-                                    isResumeSupported = isResumeSupported,
-                                    status = "DOWNLOADING",
-                                    progress = 0f,
-                                    useWebpageTitle = useWebpageTitle,
-                                    wifiOnly = wifiOnly,
-                                    retryOnFail = retryOnFail
-                                )
-                                val id = downloadRepository.insertDownload(item)
-                                // Trigger actual download
-                                DownloadEngine.startDownload(context, id, this)
-                                Toast.makeText(context, "Download started!", Toast.LENGTH_SHORT).show()
-                                onDismissRequest()
+                            val safeName = if (fileName.isNotBlank()) "$fileName.$fileExtension" else "video_file.$fileExtension"
+                            val targetFile = File(defaultDir, safeName)
+                            if (targetFile.exists()) {
+                                conflictActionType = "CONNECT"
+                                showConflictDialog = true
+                            } else {
+                                coroutineScope.launch {
+                                    val item = DownloadItem(
+                                        url = url,
+                                        fileName = safeName,
+                                        filePath = targetFile.absolutePath,
+                                        fileSize = fileSize,
+                                        bytesDownloaded = 0L,
+                                        isResumeSupported = isResumeSupported,
+                                        status = "DOWNLOADING",
+                                        progress = 0f,
+                                        useWebpageTitle = useWebpageTitle,
+                                        wifiOnly = wifiOnly,
+                                        retryOnFail = retryOnFail,
+                                        originalUrl = url,
+                                        referrerUrl = referrerUrl,
+                                        cookies = try { android.webkit.CookieManager.getInstance().getCookie(url) ?: "" } catch (e: Exception) { "" }
+                                    )
+                                    val id = downloadRepository.insertDownload(item)
+                                    DownloadEngine.startDownload(context, id, this)
+                                    Toast.makeText(context, "Download started!", Toast.LENGTH_SHORT).show()
+                                    onDismissRequest()
+                                }
                             }
                         }
                     ) {
                         Text(text = "CONNECT", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                     }
+                }
+
+                if (showConflictDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showConflictDialog = false },
+                        title = { Text(text = "File already exists", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface) },
+                        text = { Text(text = "The file \"$fileName.$fileExtension\" already exists in your device storage. What would you like to do?") },
+                        confirmButton = {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        showConflictDialog = false
+                                        coroutineScope.launch {
+                                            val safeName = if (fileName.isNotBlank()) "$fileName.$fileExtension" else "video_file.$fileExtension"
+                                            val targetFile = File(defaultDir, safeName)
+                                            val existingLength = targetFile.length()
+                                            val computedProgress = if (fileSize > 0) (existingLength.toFloat() / fileSize.toFloat() * 100f).coerceIn(0f, 100f) else 0f
+                                            
+                                            val item = DownloadItem(
+                                                url = url,
+                                                fileName = safeName,
+                                                filePath = targetFile.absolutePath,
+                                                fileSize = fileSize,
+                                                bytesDownloaded = existingLength,
+                                                isResumeSupported = isResumeSupported,
+                                                status = if (conflictActionType == "CONNECT") "DOWNLOADING" else "PAUSED",
+                                                progress = computedProgress,
+                                                useWebpageTitle = useWebpageTitle,
+                                                wifiOnly = wifiOnly,
+                                                retryOnFail = retryOnFail,
+                                                originalUrl = url,
+                                                referrerUrl = referrerUrl,
+                                                cookies = try { android.webkit.CookieManager.getInstance().getCookie(url) ?: "" } catch (e: Exception) { "" }
+                                            )
+                                            val id = downloadRepository.insertDownload(item)
+                                            if (conflictActionType == "CONNECT") {
+                                                DownloadEngine.startDownload(context, id, this)
+                                                Toast.makeText(context, "Download resumed/restarted!", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(context, "Added to download queue (Paused)", Toast.LENGTH_SHORT).show()
+                                            }
+                                            onDismissRequest()
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("Resume Incomplete Download")
+                                }
+
+                                Button(
+                                    onClick = {
+                                        showConflictDialog = false
+                                        coroutineScope.launch {
+                                            val safeName = if (fileName.isNotBlank()) "$fileName.$fileExtension" else "video_file.$fileExtension"
+                                            val targetFile = File(defaultDir, safeName)
+                                            try {
+                                                if (targetFile.exists()) {
+                                                    targetFile.delete()
+                                                }
+                                            } catch (e: Exception) { e.printStackTrace() }
+
+                                            val item = DownloadItem(
+                                                url = url,
+                                                fileName = safeName,
+                                                filePath = targetFile.absolutePath,
+                                                fileSize = fileSize,
+                                                bytesDownloaded = 0L,
+                                                isResumeSupported = isResumeSupported,
+                                                status = if (conflictActionType == "CONNECT") "DOWNLOADING" else "PAUSED",
+                                                progress = 0f,
+                                                useWebpageTitle = useWebpageTitle,
+                                                wifiOnly = wifiOnly,
+                                                retryOnFail = retryOnFail,
+                                                originalUrl = url,
+                                                referrerUrl = referrerUrl,
+                                                cookies = try { android.webkit.CookieManager.getInstance().getCookie(url) ?: "" } catch (e: Exception) { "" }
+                                            )
+                                            val id = downloadRepository.insertDownload(item)
+                                            if (conflictActionType == "CONNECT") {
+                                                DownloadEngine.startDownload(context, id, this)
+                                                Toast.makeText(context, "Download replaced and started fresh!", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(context, "Replaced and added to queue (Paused)", Toast.LENGTH_SHORT).show()
+                                            }
+                                            onDismissRequest()
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("Replace Existing File")
+                                }
+
+                                Button(
+                                    onClick = {
+                                        showConflictDialog = false
+                                        coroutineScope.launch {
+                                            val baseName = if (fileName.isNotBlank()) fileName else "video_file"
+                                            var counter = 1
+                                            var safeName = "$baseName($counter).$fileExtension"
+                                            var targetFile = File(defaultDir, safeName)
+                                            while (targetFile.exists()) {
+                                                counter++
+                                                safeName = "$baseName($counter).$fileExtension"
+                                                targetFile = File(defaultDir, safeName)
+                                            }
+
+                                            val item = DownloadItem(
+                                                url = url,
+                                                fileName = safeName,
+                                                filePath = targetFile.absolutePath,
+                                                fileSize = fileSize,
+                                                bytesDownloaded = 0L,
+                                                isResumeSupported = isResumeSupported,
+                                                status = if (conflictActionType == "CONNECT") "DOWNLOADING" else "PAUSED",
+                                                progress = 0f,
+                                                useWebpageTitle = useWebpageTitle,
+                                                wifiOnly = wifiOnly,
+                                                retryOnFail = retryOnFail,
+                                                originalUrl = url,
+                                                referrerUrl = referrerUrl,
+                                                cookies = try { android.webkit.CookieManager.getInstance().getCookie(url) ?: "" } catch (e: Exception) { "" }
+                                            )
+                                            val id = downloadRepository.insertDownload(item)
+                                            if (conflictActionType == "CONNECT") {
+                                                DownloadEngine.startDownload(context, id, this)
+                                                Toast.makeText(context, "Started download as " + safeName, Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(context, "Added to queue as " + safeName + " (Paused)", Toast.LENGTH_SHORT).show()
+                                            }
+                                            onDismissRequest()
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("Rename & Download")
+                                }
+
+                                OutlinedButton(
+                                    onClick = { showConflictDialog = false },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("Cancel")
+                                }
+                            }
+                        },
+                        dismissButton = null
+                    )
                 }
             }
         }
@@ -722,6 +892,7 @@ fun DownloadManagerDialog(
     onDismissRequest: () -> Unit,
     downloadRepository: DownloadRepository,
     coroutineScope: CoroutineScope,
+    onExitClick: () -> Unit,
     initialTab: Int = 0
 ) {
     val context = LocalContext.current
@@ -878,6 +1049,50 @@ fun DownloadManagerDialog(
 
         Scaffold(
             modifier = Modifier.fillMaxSize(),
+            bottomBar = {
+                val isDarkTheme = remember { sharedPrefs.getBoolean("is_dark_theme", true) }
+                val goldAccent = Color(0xFFFFB300)
+                val redAccent = Color(0xFFE50914)
+                
+                Surface(
+                    tonalElevation = 8.dp,
+                    color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Button(
+                        onClick = onExitClick,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                            .height(48.dp)
+                            .testTag("download_manager_exit_button"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isDarkTheme) goldAccent else redAccent,
+                            contentColor = if (isDarkTheme) Color.Black else Color.White
+                        ),
+                        shape = RoundedCornerShape(24.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Home,
+                                contentDescription = null,
+                                tint = if (isDarkTheme) Color.Black else Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Exit & Back to Home",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isDarkTheme) Color.Black else Color.White
+                            )
+                        }
+                    }
+                }
+            },
             topBar = {
                 Column {
                     TopAppBar(

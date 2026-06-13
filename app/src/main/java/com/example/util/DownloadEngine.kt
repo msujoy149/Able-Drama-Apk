@@ -24,9 +24,89 @@ object DownloadEngine {
     var appContext: Context? = null
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // Global in-memory registry of newly detected media URLs mapped by filename signature
+    val recentlyDetectedUrls = ConcurrentHashMap<String, String>()
+
+    fun registerDetectedUrl(title: String, url: String) {
+        val key = title.trim().lowercase()
+        if (key.isNotEmpty()) {
+            recentlyDetectedUrls[key] = url
+        }
+    }
+
+    fun findFreshUrlForFile(fileName: String, originalUrl: String): String? {
+        val cleanName = fileName.substringBeforeLast(".").trim().lowercase()
+        if (cleanName.isBlank()) return null
+
+        // 1. Check direct filename match in recently detected URLs
+        for ((title, url) in recentlyDetectedUrls) {
+            val cleanTitle = title.substringBeforeLast(".").trim().lowercase()
+            if (cleanName.contains(cleanTitle) || cleanTitle.contains(cleanName)) {
+                Log.d(TAG, "Dynamic URL match found in memory registry: $url")
+                return url
+            }
+        }
+        return null
+    }
+
+    private suspend fun tryReacquireFromReferrer(referrerUrl: String, fileName: String, fileExtension: String): String? {
+        if (referrerUrl.isBlank()) return null
+        
+        try {
+            Log.d(TAG, "Attempting to reacquire link by fetching referrer page: $referrerUrl")
+            val url = URL(referrerUrl)
+            val conn = url.openConnection() as HttpURLConnection
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            conn.connect()
+            
+            if (conn.responseCode == 200) {
+                val html = conn.inputStream.bufferedReader().use { it.readText() }
+                // Use regex to locate candidate media URLs matching current extension on page
+                val regexHttp = "https?://[-a-zA-Z0-9+&@#/%?=~_|!:,.;]*\\.$fileExtension[-a-zA-Z0-9+&@#/%=~_|]*".toRegex()
+                val foundUrls = regexHttp.findAll(html).map { it.value }.toList()
+                Log.d(TAG, "Found ${foundUrls.size} candidate links with extension $fileExtension on referrer page")
+                
+                if (foundUrls.isNotEmpty()) {
+                    val cleanFileName = fileName.substringBeforeLast(".").substringBefore("(").trim().lowercase()
+                    if (cleanFileName.length >= 3) {
+                        for (found in foundUrls) {
+                            if (found.lowercase().contains(cleanFileName)) {
+                                Log.d(TAG, "A perfect match found on page: $found")
+                                return found
+                            }
+                        }
+                    }
+                    Log.d(TAG, "No perfect match; returning the first candidate: ${foundUrls[0]}")
+                    return foundUrls[0]
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error trying to reacquire from referrer: ${e.localizedMessage}")
+        }
+        return null
+    }
+
     fun init(context: Context, repo: DownloadRepository) {
         appContext = context.applicationContext
         repository = repo
+        
+        // Download recovery system for validation, cleanup, and broken task recovery
+        engineScope.launch {
+            try {
+                val stuckTasks = repo.getActiveDownloadsDirect()
+                for (task in stuckTasks) {
+                    repo.updateDownload(task.copy(
+                        status = "PAUSED",
+                        downloadSpeed = "Recovered",
+                        eta = "Paused on startup"
+                    ))
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in startup download recovery system", e)
+            }
+        }
     }
 
     fun isNetworkAvailable(context: Context): Boolean {
@@ -85,74 +165,152 @@ object DownloadEngine {
         val job = engineScope.launch(Dispatchers.IO) {
             val repo = repository ?: return@launch
             var item = repo.getDownloadById(itemId) ?: return@launch
+            var urlSpec = item.url
+
+            var consecutiveErrors = 0
+            val maxConsecutiveErrors = 5
+            val baseDelayMs = 2000L
 
             try {
-                // Update status to DOWNLOADING
-                repo.updateDownload(item.copy(status = "DOWNLOADING", downloadSpeed = "Connecting..."))
+                while (isActive) {
+                    try {
+                        // Update status indicating connecting attempts
+                        val statusText = if (consecutiveErrors == 0) "Connecting..." else "Reconnecting..."
+                        repo.updateDownload(item.copy(
+                            status = "DOWNLOADING",
+                            downloadSpeed = statusText,
+                            eta = if (consecutiveErrors == 0) "Validating..." else "Attempt ${consecutiveErrors + 1}/$maxConsecutiveErrors"
+                        ))
 
-                val urlSpec = item.url
-                val outputFile = File(item.filePath)
-                val destinationDir = outputFile.parentFile
-                if (destinationDir != null && !destinationDir.exists()) {
-                    destinationDir.mkdirs()
-                }
+                        val outputFile = File(item.filePath)
+                        val destinationDir = outputFile.parentFile
+                        if (destinationDir != null && !destinationDir.exists()) {
+                            destinationDir.mkdirs()
+                        }
 
-                // Quick HEAD/GET probe request to determine Content-Length and Range capability
-                val probeUrl = URL(urlSpec)
-                val probeConn = probeUrl.openConnection() as HttpURLConnection
-                probeConn.requestMethod = "GET"
-                probeConn.connectTimeout = 10000
-                probeConn.readTimeout = 10000
-                probeConn.setRequestProperty("Range", "bytes=0-0")
-                probeConn.connect()
+                        // Attempt link probe connection
+                        var probeUrl = URL(urlSpec)
+                        var probeConn = probeUrl.openConnection() as HttpURLConnection
+                        probeConn.requestMethod = "GET"
+                        probeConn.connectTimeout = 8000
+                        probeConn.readTimeout = 8000
+                        probeConn.setRequestProperty("Range", "bytes=0-0")
+                        if (item.cookies.isNotBlank()) {
+                            probeConn.setRequestProperty("Cookie", item.cookies)
+                        }
+                        probeConn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-                val responseCode = probeConn.responseCode
-                val acceptsRanges = (responseCode == HttpURLConnection.HTTP_PARTIAL) || 
-                                    (probeConn.getHeaderField("Accept-Ranges") == "bytes")
-                
-                var totalLength = probeConn.contentLength.toLong()
-                if (totalLength <= 0) {
-                    totalLength = item.fileSize
-                }
-
-                if (responseCode == HttpURLConnection.HTTP_PARTIAL) {
-                    val rangeHeader = probeConn.getHeaderField("Content-Range")
-                    if (rangeHeader != null) {
+                        var responseCode = -1
                         try {
-                            totalLength = rangeHeader.substringAfterLast("/").toLong()
-                        } catch (e: Exception) {}
+                            probeConn.connect()
+                            responseCode = probeConn.responseCode
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Connection probe caught Exception: ${e.localizedMessage}")
+                        }
+
+                        // Expired token/web page invalidation check (HTTP 401, 403, 404, 410, or unresolvable connection)
+                        if (responseCode == 401 || responseCode == 403 || responseCode == 404 || responseCode == 410 || responseCode == -1) {
+                            Log.d(TAG, "Probe returned invalid HTTP code ($responseCode). Activating resume recovery system...")
+
+                            val fileExtension = item.fileName.substringAfterLast(".", "mp4")
+                            var refreshedUrl = findFreshUrlForFile(item.fileName, item.url)
+
+                            if (refreshedUrl == null && item.referrerUrl.isNotBlank()) {
+                                refreshedUrl = tryReacquireFromReferrer(item.referrerUrl, item.fileName, fileExtension)
+                            }
+
+                            if (refreshedUrl != null && refreshedUrl != urlSpec) {
+                                Log.d(TAG, "Successfully reacquired new URL: $refreshedUrl")
+                                urlSpec = refreshedUrl
+                                item = item.copy(url = refreshedUrl)
+                                repo.updateDownload(item)
+                                
+                                // Reconnect immediately with updated URL spec
+                                consecutiveErrors = 0
+                                continue
+                            } else if (responseCode == 403 || responseCode == 404 || responseCode == 410) {
+                                // Definitive expiration / file removed
+                                val diedMsg = "Download source is no longer available."
+                                val failedItem = item.copy(
+                                    status = "ERROR",
+                                    downloadSpeed = "Expired",
+                                    eta = diedMsg
+                                )
+                                repo.updateDownload(failedItem)
+                                appContext?.let { DownloadForegroundService.showFailedNotification(it, failedItem) }
+                                return@launch
+                            }
+                        }
+
+                        // Proceeding since probe connection succeeded
+                        val acceptsRanges = (responseCode == HttpURLConnection.HTTP_PARTIAL) || 
+                                            (probeConn.getHeaderField("Accept-Ranges") == "bytes")
+                        
+                        var totalLength = probeConn.contentLength.toLong()
+                        if (totalLength <= 0) {
+                            totalLength = item.fileSize
+                        }
+
+                        if (responseCode == HttpURLConnection.HTTP_PARTIAL) {
+                            val rangeHeader = probeConn.getHeaderField("Content-Range")
+                            if (rangeHeader != null) {
+                                try {
+                                    totalLength = rangeHeader.substringAfterLast("/").toLong()
+                                } catch (e: Exception) {}
+                            }
+                        }
+                        probeConn.disconnect()
+
+                        // Synchronize and persist download metadata
+                        if (item.fileSize <= 0 && totalLength > 0) {
+                            item = item.copy(fileSize = totalLength)
+                            repo.updateDownload(item)
+                        } else if (totalLength <= 0) {
+                            totalLength = item.fileSize
+                        }
+
+                        val canUseMultiPart = acceptsRanges && totalLength > 1024 * 1024 && item.isResumeSupported // > 1MB
+
+                        if (canUseMultiPart) {
+                            downloadMultiPart(context, repo, item, totalLength)
+                        } else {
+                            downloadSingleThread(context, repo, item, totalLength)
+                        }
+                        break // Succeeded/launched, exit starting validation retry loop
+
+                    } catch (e: Exception) {
+                        consecutiveErrors++
+                        Log.w(TAG, "Start connection failed (Error count: $consecutiveErrors): ${e.localizedMessage}")
+
+                        if (e is java.io.FileNotFoundException) {
+                            val failedItem = item.copy(
+                                status = "ERROR",
+                                downloadSpeed = "Expired",
+                                eta = "Download source is no longer available."
+                            )
+                            repo.updateDownload(failedItem)
+                            appContext?.let { DownloadForegroundService.showFailedNotification(it, failedItem) }
+                            break
+                        }
+
+                        if (consecutiveErrors >= maxConsecutiveErrors) {
+                            val failedItem = item.copy(
+                                status = "ERROR",
+                                downloadSpeed = "Failed",
+                                eta = e.localizedMessage ?: "Connecting error"
+                            )
+                            repo.updateDownload(failedItem)
+                            appContext?.let { DownloadForegroundService.showFailedNotification(it, failedItem) }
+                            break
+                        }
+
+                        val delayMs = (baseDelayMs * (1 shl (consecutiveErrors - 1))).coerceAtMost(30000L)
+                        repo.updateDownload(item.copy(
+                            downloadSpeed = "Retrying...",
+                            eta = "Reconnect in ${delayMs / 1000}s"
+                        ))
+                        delay(delayMs)
                     }
-                }
-                probeConn.disconnect()
-
-                // Update size if it was not known
-                if (item.fileSize <= 0 && totalLength > 0) {
-                    item = item.copy(fileSize = totalLength)
-                    repo.updateDownload(item)
-                } else if (totalLength <= 0) {
-                    totalLength = item.fileSize
-                }
-
-                val canUseMultiPart = acceptsRanges && totalLength > 1024 * 1024 && item.isResumeSupported // > 1MB
-
-                if (canUseMultiPart) {
-                    downloadMultiPart(context, repo, item, totalLength)
-                } else {
-                    downloadSingleThread(context, repo, item, totalLength)
-                }
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in download loop: ${e.localizedMessage}")
-                e.printStackTrace()
-                val currentItem = repo.getDownloadById(itemId)
-                if (currentItem != null && currentItem.status == "DOWNLOADING") {
-                    val failedItem = currentItem.copy(
-                        status = "ERROR",
-                        downloadSpeed = "Failed",
-                        eta = "Error: ${e.localizedMessage ?: "Network error"}"
-                    )
-                    repo.updateDownload(failedItem)
-                    appContext?.let { DownloadForegroundService.showFailedNotification(it, failedItem) }
                 }
             } finally {
                 activeJobs.remove(itemId)
@@ -218,7 +376,9 @@ object DownloadEngine {
                                 break
                             }
 
-                            val url = URL(item.url)
+                            val currentItem = repo.getDownloadById(item.id)
+                            val currentUrl = currentItem?.url ?: item.url
+                            val url = URL(currentUrl)
                             connection = url.openConnection() as HttpURLConnection
                             connection.connectTimeout = 15000
                             connection.readTimeout = 15000
@@ -415,7 +575,9 @@ object DownloadEngine {
                     delay(3000L)
                 }
 
-                val url = URL(item.url)
+                val currentItem = repo.getDownloadById(item.id)
+                val currentUrl = currentItem?.url ?: item.url
+                val url = URL(currentUrl)
                 connection = url.openConnection() as HttpURLConnection
                 connection.connectTimeout = 15000
                 connection.readTimeout = 15000
