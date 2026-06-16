@@ -210,6 +210,13 @@ class BrowserViewModel(
         _openBrowserTrigger.tryEmit(Unit)
     }
 
+    private val _triggerReturnToDramaDialog = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val triggerReturnToDramaDialog = _triggerReturnToDramaDialog.asSharedFlow()
+
+    fun triggerReturnToDramaDialog() {
+        _triggerReturnToDramaDialog.tryEmit(Unit)
+    }
+
     private val _requestSearchFocus = MutableStateFlow(false)
     val requestSearchFocus: StateFlow<Boolean> = _requestSearchFocus.asStateFlow()
 
@@ -262,6 +269,36 @@ class BrowserViewModel(
     fun isValidVideoResource(url: String, title: String): Boolean {
         val urlLower = url.lowercase()
         val titleLower = title.lowercase().trim()
+
+        // 1. If it is a known major video platform CDN or stream URL, it is always a valid video resource!
+        val isMajorVideoCdnStream = urlLower.contains("googlevideo.com") ||
+                                    urlLower.contains("videoplayback") ||
+                                    urlLower.contains("video_stream") ||
+                                    urlLower.contains("video-cdn") ||
+                                    (urlLower.contains("fbcdn.net") && (urlLower.contains("/v/") || urlLower.contains("_v_") || urlLower.contains(".mp4"))) ||
+                                    urlLower.contains("tiktokv.com") ||
+                                    urlLower.contains("tiktok.com") ||
+                                    urlLower.contains("vimeo") ||
+                                    urlLower.contains("dailymotion") ||
+                                    urlLower.contains(".m3u8")
+
+        if (isMajorVideoCdnStream) {
+            // Keep it! But make sure it's not a generic tracking, logging, analytics, subtitling, or ad url
+            val blacklistKeywords = listOf(
+                "analytics", "telemetry", "metrics", "collect", "tracker", "logging", "logger", 
+                "google-analytics", "doubleclick", "googlesyndication", "/ad", "popads", "popcash", 
+                "manifest.json", "manifest.mpd", "hotkeys", "caption", "subtitles", "playlog", "ping", 
+                "/v1/logs", "youtubei/v1", "/log_event", "pagead", "favicon.ico"
+            )
+            if (blacklistKeywords.any { urlLower.contains(it) }) {
+                return false
+            }
+            // For YouTube, filter out audio-only streams
+            if (urlLower.contains("googlevideo.com") && urlLower.contains("mime=audio")) {
+                return false
+            }
+            return true
+        }
 
         val forbiddenTitles = listOf("collect", "config", "unknown", "stream", "blob", "resource", "video_001", "resource_xxx")
         if (forbiddenTitles.any { titleLower == it || titleLower.contains(it) }) {
@@ -409,7 +446,26 @@ class BrowserViewModel(
                 }
             }
         }
-        if (activeSrc.isNotBlank() && activeSrc.startsWith("http")) {
+
+        val activeTab = _browserTabs.value.find { it.id == tabId } ?: _dramaTabs.value.find { it.id == tabId }
+        val pageUrl = activeTab?.url ?: currentUrl.value
+        val isDownloadable = isDownloadablePage(pageUrl)
+
+        if (isPlaying && isDownloadable) {
+            // If activeSrc is blank or uses MSE blobs, synthesize high quality fallback stream using the page URL
+            val deservesFallback = activeSrc.isBlank() || activeSrc.startsWith("blob:") || !activeSrc.startsWith("http")
+            val targetMediaUrl = if (deservesFallback) pageUrl else activeSrc
+            val resolvedTitle = if (activeTitle.isNotBlank()) activeTitle else (activeTab?.title?.replace(" - YouTube", "")?.replace(" | Facebook", "")?.replace(" - TikTok", "") ?: "Playable Video Stream")
+
+            val playRes = DetectedResource(
+                url = targetMediaUrl,
+                title = if (resolvedTitle.isNotBlank()) resolvedTitle else "Video Media Stream",
+                fileType = "Video",
+                quality = if (targetMediaUrl.contains(".m3u8")) "HLS Playlist" else "720p",
+                fileSize = 0L
+            )
+            addDetectedResource(tabId, playRes)
+        } else if (activeSrc.isNotBlank() && activeSrc.startsWith("http")) {
             val playRes = DetectedResource(
                 url = activeSrc,
                 title = if (activeTitle.isNotBlank()) activeTitle else "Video Playback Name",

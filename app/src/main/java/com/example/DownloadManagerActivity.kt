@@ -18,10 +18,6 @@ import com.example.ui.theme.MyApplicationTheme
 
 class DownloadManagerActivity : ComponentActivity() {
 
-    override fun getAttributionTag(): String? {
-        return "abledrama-attribution"
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()

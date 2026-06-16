@@ -47,16 +47,7 @@ import java.io.File
 import java.text.DecimalFormat
 
 private fun Context.getClipboardManager(): ClipboardManager? {
-    val attributionContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-        try {
-            this.createAttributionContext("abledrama-attribution")
-        } catch (t: Throwable) {
-            this
-        }
-    } else {
-        this
-    }
-    return attributionContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    return this.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
 }
 
 // Helper function to resolve physical path from SAF tree URI

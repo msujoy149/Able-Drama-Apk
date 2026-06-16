@@ -339,6 +339,15 @@ fun AdvancedWebView(
                     return
                 }
                 viewModel.updateCurrentState(tabId, url, view?.title ?: "")
+                if (view != null) {
+                    injectVideoPlaybackObserver(view, tabId, viewModel)
+                    view.postDelayed({
+                        injectVideoPlaybackObserver(view, tabId, viewModel)
+                    }, 1000)
+                    view.postDelayed({
+                        injectVideoPlaybackObserver(view, tabId, viewModel)
+                    }, 2500)
+                }
             }
         }
 
@@ -500,6 +509,7 @@ fun AdvancedWebView(
     // Intercept system Back button to navigate parent web stack if this tab is active
     val selectedTabIdVal by viewModel.selectedTabId.collectAsState()
     val tabsListVal by viewModel.tabs.collectAsState()
+    val isDramaActiveState by viewModel.isDramaModeActive.collectAsState()
 
     val isSelectedTab = remember(selectedTabIdVal, tabId) {
         selectedTabIdVal == tabId
@@ -509,8 +519,35 @@ fun AdvancedWebView(
         tabsListVal.find { it.id == tabId }?.canGoBack ?: false
     }
 
-    BackHandler(enabled = canGoBack && isVisible && isSelectedTab) {
-        viewModel.goBack()
+    val backHandlerEnabled = remember(isDramaActiveState, canGoBack, isVisible, isSelectedTab) {
+        if (!isDramaActiveState) {
+            isVisible && isSelectedTab
+        } else {
+            canGoBack && isVisible && isSelectedTab
+        }
+    }
+
+    BackHandler(enabled = backHandlerEnabled) {
+        if (!isDramaActiveState) {
+            if (webView.canGoBack()) {
+                webView.goBack()
+                viewModel.updateNavigationCapabilities(
+                    tabId,
+                    back = webView.canGoBack(),
+                    forward = webView.canGoForward()
+                )
+            } else {
+                val currentUrlVal = webView.url ?: ""
+                val isAtActiveHome = currentUrlVal == "browser://home" || currentUrlVal.isBlank()
+                if (!isAtActiveHome) {
+                    viewModel.loadUrl("browser://home")
+                } else {
+                    viewModel.triggerReturnToDramaDialog()
+                }
+            }
+        } else {
+            viewModel.goBack()
+        }
     }
 
     LaunchedEffect(webView, isVisible) {
@@ -866,8 +903,27 @@ fun injectVideoPlaybackObserver(webView: WebView?, tabId: String, viewModel: Bro
             return "Video Playback Theme";
           }
 
+          function findVideos() {
+            var allVideos = Array.from(document.querySelectorAll('video'));
+            var iframes = document.querySelectorAll('iframe');
+            for (var i = 0; i < iframes.length; i++) {
+              try {
+                var iframeDoc = iframes[i].contentDocument || iframes[i].contentWindow.document;
+                if (iframeDoc) {
+                  var iframeVideos = iframeDoc.querySelectorAll('video');
+                  for (var j = 0; j < iframeVideos.length; j++) {
+                    allVideos.push(iframeVideos[j]);
+                  }
+                }
+              } catch(e) {
+                // Cross-origin iframe, ignore
+              }
+            }
+            return allVideos;
+          }
+
           function checkVideos() {
-            var videos = document.querySelectorAll('video');
+            var videos = findVideos();
             var anyPlaying = false;
             var anyStarted = false;
             var allEnded = true;
@@ -907,7 +963,7 @@ fun injectVideoPlaybackObserver(webView: WebView?, tabId: String, viewModel: Bro
           }
 
           function setupListeners() {
-            var videos = document.querySelectorAll('video');
+            var videos = findVideos();
             for (var i = 0; i < videos.length; i++) {
               var v = videos[i];
               if (!v.hasAttribute('data-play-listener')) {

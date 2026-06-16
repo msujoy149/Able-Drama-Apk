@@ -111,23 +111,10 @@ import java.util.Date
 import java.util.Locale
 
 private fun Context.getClipboardManager(): ClipboardManager? {
-    val attributionContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-        try {
-            this.createAttributionContext("abledrama-attribution")
-        } catch (t: Throwable) {
-            this
-        }
-    } else {
-        this
-    }
-    return attributionContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    return this.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
 }
 
 class MainActivity : ComponentActivity() {
-
-    override fun getAttributionTag(): String? {
-        return "abledrama-attribution"
-    }
 
     private var clipboardObserver: ClipboardObserver? = null
 
@@ -578,6 +565,14 @@ fun MainAppContent(
     var showAboutBrowserDialog by remember { mutableStateOf(false) }
     var showTelegramDialog by remember { mutableStateOf(false) }
     var showExitDialog by remember { mutableStateOf(false) }
+    var showReturnToDramaDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(viewModel) {
+        viewModel.triggerReturnToDramaDialog.collect {
+            showReturnToDramaDialog = true
+        }
+    }
+
     val currentDetectedResources by viewModel.currentDetectedResources.collectAsStateWithLifecycle()
     val isVideoPlaying by viewModel.isVideoPlaying.collectAsStateWithLifecycle()
     val activeVideoDurationMap by viewModel.activeVideoDurationMap.collectAsStateWithLifecycle()
@@ -707,7 +702,11 @@ fun MainAppContent(
                         viewModel.loadUrl("browser://home")
                         showUrlBar = false
                     } else {
-                        showExitDialog = true
+                        if (!isDramaModeActive) {
+                            showReturnToDramaDialog = true
+                        } else {
+                            showExitDialog = true
+                        }
                     }
                 }
             }
@@ -1624,6 +1623,29 @@ fun MainAppContent(
                 },
                 dismissButton = {
                     TextButton(onClick = { showExitDialog = false }) {
+                        Text("Cancel", fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            )
+        }
+
+        if (showReturnToDramaDialog) {
+            AlertDialog(
+                onDismissRequest = { showReturnToDramaDialog = false },
+                title = { Text("Return to Able Drama", fontWeight = FontWeight.Bold) },
+                text = { Text("Would you like to exit Able Browser and return to Able Drama?") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showReturnToDramaDialog = false
+                            exitAndBackToHome()
+                        }
+                    ) {
+                        Text("Return", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showReturnToDramaDialog = false }) {
                         Text("Cancel", fontWeight = FontWeight.SemiBold)
                     }
                 }
