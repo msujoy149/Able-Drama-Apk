@@ -48,6 +48,7 @@ fun AdvancedWebView(
     tabId: String,
     isVisible: Boolean = true,
     isDarkTheme: Boolean = false,
+    isDesktopModeAllowed: Boolean = false,
     modifier: Modifier = Modifier,
     onShowCustomView: (android.view.View, WebChromeClient.CustomViewCallback) -> Unit = { _, _ -> },
     onHideCustomView: () -> Unit = {},
@@ -106,6 +107,9 @@ fun AdvancedWebView(
                 offscreenPreRaster = true
             }
 
+            // Bind Javascript Interface for real-time video playback events and title observation
+            addJavascriptInterface(VideoPlayObserver(viewModel, tabId), "VideoPlayObserver")
+
             // Custom Download listener to show 1DM style Downloader Dialog
             setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
                 onDownloadRequested(url, contentDisposition, mimeType, contentLength)
@@ -117,6 +121,28 @@ fun AdvancedWebView(
                 false
             }
         }
+    }
+
+    val defaultUserAgent = remember(webView) { webView.settings.userAgentString }
+    val isDesktopModeEnabledState by viewModel.isDesktopModeEnabled.collectAsState()
+    val isDesktopCurrentlyActive = isDesktopModeAllowed && isDesktopModeEnabledState
+
+    var prevDesktopMode by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(isDesktopCurrentlyActive, webView) {
+        if (isDesktopCurrentlyActive) {
+            val desktopUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            webView.settings.userAgentString = desktopUserAgent
+        } else {
+            webView.settings.userAgentString = defaultUserAgent
+        }
+
+        if (prevDesktopMode != null && prevDesktopMode != isDesktopCurrentlyActive) {
+            val currentUrl = webView.url
+            if (isVisible && !currentUrl.isNullOrBlank() && currentUrl != "browser://home" && !currentUrl.startsWith("browser:")) {
+                webView.reload()
+            }
+        }
+        prevDesktopMode = isDesktopCurrentlyActive
     }
 
     LaunchedEffect(webView, isDarkTheme) {
@@ -320,6 +346,14 @@ fun AdvancedWebView(
             super.onPageFinished(view, url)
             viewModel.updateLoadingStatus(tabId, false, 100)
             if (view != null) {
+                injectVideoPlaybackObserver(view, tabId, viewModel)
+                view.postDelayed({
+                    injectVideoPlaybackObserver(view, tabId, viewModel)
+                }, 1500)
+                view.postDelayed({
+                    injectVideoPlaybackObserver(view, tabId, viewModel)
+                }, 3500)
+
                 extractPageResources(view, tabId, viewModel)
                 view.postDelayed({
                     extractPageResources(view, tabId, viewModel)
@@ -551,12 +585,37 @@ internal fun applyBrowserLevelDarkTheme(webView: WebView, isDarkTheme: Boolean) 
 fun detectMediaType(url: String): DetectedResource? {
     val cleanUrl = url.substringBefore("?").lowercase()
     val fullUrlLower = url.lowercase()
+
+    // 1. Check strict blacklist words indicating configs, analytics, trackers, ads, fragments
+    val blacklistKeywords = listOf(
+        "analytics", "telemetry", "metrics", "collect", "tracker", "logging", "logger", 
+        "google-analytics", "doubleclick", "googlesyndication", "/ad", "popads", "popcash", 
+        "config", "settings", "manifest.json", "manifest.mpd", "hotkeys", "caption", 
+        "subtitles", "playlog", "ping", "/v1/logs", "youtubei/v1", "/log_event", "pagead",
+        "favicon.ico", "adsystem", "exoclick", "clck.ru", "stat", "beacon", "pixel",
+        "/fragment", "-fragment", "_fragment",
+        "/chunk", "-chunk", "_chunk",
+        "/segment", "-segment", "_segment",
+        "m3u8_audio", "range="
+    )
     
-    // 1. Check explicit blacklisted extensions first (Images, Audio, Documents, Archives, General files)
+    for (keyword in blacklistKeywords) {
+        if (fullUrlLower.contains(keyword)) {
+            if (fullUrlLower.contains("videoplayback")) {
+                if (fullUrlLower.contains("mime=audio")) {
+                    return null
+                }
+            } else {
+                return null
+            }
+        }
+    }
+
+    // 2. Explicit exclusions for file types we don't want to count as video
     val imageExtensions = listOf(".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico", ".tiff")
     val audioExtensions = listOf(".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac", ".wma", ".opus", ".mka", ".m3u", ".m3u8_audio")
     val docExtensions = listOf(".pdf", ".epub", ".docx", ".xlsx", ".pptx", ".txt", ".doc", ".xls", ".csv", ".rtf")
-    val archiveAndGeneralExtensions = listOf(".zip", ".rar", ".7z", ".apk", ".dmg", ".tar", ".gz", ".exe", ".bin", ".msi", ".iso", ".jar", ".json", ".xml", ".css", ".js")
+    val archiveAndGeneralExtensions = listOf(".zip", ".rar", ".7z", ".apk", ".dmg", ".tar", ".gz", ".exe", ".bin", ".msi", ".iso", ".jar", ".json", ".xml", ".css", ".js", ".ts")
 
     val isExcluded = imageExtensions.any { cleanUrl.endsWith(it) } ||
                      audioExtensions.any { cleanUrl.endsWith(it) } ||
@@ -569,19 +628,19 @@ fun detectMediaType(url: String): DetectedResource? {
         return null
     }
 
-    // 2. Identify Video extensions
-    val videoExtensions = listOf(".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".3gp", ".m4v", ".wmv", ".mpeg", ".ts", ".m3u8")
+    // 3. Identify Video extensions
+    val videoExtensions = listOf(".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".3gp", ".m4v", ".wmv", ".mpeg", ".m3u8")
     val isVideoExtension = videoExtensions.any { cleanUrl.endsWith(it) }
 
-    // 3. Identify Video Streams / CDN / Specific sites
+    // 4. Identify Video Streams / CDN / Specific sites
     val isVideoStream = fullUrlLower.contains("video_stream") || 
                         fullUrlLower.contains("/videoplayback") || 
                         fullUrlLower.contains("video-cdn") ||
                         fullUrlLower.contains("googlevideo.com") ||
                         fullUrlLower.contains(".m3u8") ||
                         (fullUrlLower.contains("fbcdn.net") && (fullUrlLower.contains("/v/") || fullUrlLower.contains("_v_") || fullUrlLower.contains(".mp4"))) ||
+                        fullUrlLower.contains("tiktokv.com") ||
                         fullUrlLower.contains("tiktok.com") ||
-                        fullUrlLower.contains("doubleclick.net") ||
                         (fullUrlLower.contains("/video/") && !cleanUrl.endsWith(".html") && !cleanUrl.endsWith(".php") && !cleanUrl.endsWith(".js") && !cleanUrl.endsWith(".css")) ||
                         (fullUrlLower.contains("/embed/") && fullUrlLower.contains("video"))
 
@@ -622,18 +681,43 @@ fun extractPageResources(webView: WebView?, tabId: String, viewModel: BrowserVie
         (function() {
           var resources = [];
           
+          function findTitleForVideo(videoElement) {
+            if (videoElement.getAttribute('aria-label')) return videoElement.getAttribute('aria-label').trim();
+            if (videoElement.getAttribute('title')) return videoElement.getAttribute('title').trim();
+
+            var ytTitle = document.querySelector('h1.ytd-watch-metadata') || document.querySelector('h1.title.ytd-video-primary-info-renderer');
+            if (ytTitle) {
+              var txt = ytTitle.innerText || ytTitle.textContent;
+              if (txt && txt.trim()) return txt.trim();
+            }
+
+            var parent = videoElement.parentElement;
+            for (var depth = 0; depth < 5 && parent; depth++) {
+              var headings = parent.querySelectorAll('h1, h2, h3, h4, h5, h6, [class*="title"], [id*="title"]');
+              for (var k = 0; k < headings.length; k++) {
+                var h = headings[k];
+                if (h.innerText && h.innerText.trim().length > 3 && h.innerText.trim().length < 150) {
+                  return h.innerText.trim();
+                }
+              }
+              parent = parent.parentElement;
+            }
+            return "";
+          }
+
           // 1. Scan <video> elements only
           var videos = document.querySelectorAll('video');
           for (var i = 0; i < videos.length; i++) {
             var v = videos[i];
+            var vTitle = findTitleForVideo(v) || (document.title ? document.title.replace(/\s*-\s*YouTube/gi, "").trim() : "") || "Video Element";
             if (v.src && v.src.indexOf('http') === 0) {
-              resources.push({ url: v.src, type: 'Video', title: 'Video Element' });
+              resources.push({ url: v.src, type: 'Video', title: vTitle });
             }
             var sources = v.querySelectorAll('source');
             for (var j = 0; j < sources.length; j++) {
               var s = sources[j];
               if (s.src && s.src.indexOf('http') === 0) {
-                resources.push({ url: s.src, type: 'Video', title: 'Video Stream Source' });
+                resources.push({ url: s.src, type: 'Video', title: vTitle });
               }
             }
           }
@@ -688,5 +772,185 @@ fun extractPageResources(webView: WebView?, tabId: String, viewModel: BrowserVie
                 // Ignore errors
             }
         }
+    }
+}
+
+fun injectVideoPlaybackObserver(webView: WebView?, tabId: String, viewModel: BrowserViewModel) {
+    if (webView == null) return
+    val js = """
+        (function() {
+          function isGenericJsTitle(title) {
+            if (!title) return true;
+            var t = title.toLowerCase().trim();
+            return t === "" || 
+                   t === "video" || 
+                   t === "video element" || 
+                   t === "videoplayback" || 
+                   t === "unknown" || 
+                   t === "stream" || 
+                   t === "blob" || 
+                   t === "collect" || 
+                   t === "config" || 
+                   t === "resource" || 
+                   t === "video_001" ||
+                   t === "resource_001" || 
+                   t.indexOf("video stream") !== -1 ||
+                   t.indexOf("video link") !== -1;
+          }
+
+          function getCleanPageTitle() {
+            // 1. Video Title
+            var ytTitle = document.querySelector('h1.ytd-watch-metadata') || 
+                           document.querySelector('h1.title.ytd-video-primary-info-renderer') ||
+                           document.querySelector('.ytp-title-link');
+            if (ytTitle) {
+              var txt = ytTitle.innerText || ytTitle.textContent;
+              if (txt && txt.trim() && !isGenericJsTitle(txt)) return txt.trim();
+            }
+
+            var videos = document.querySelectorAll('video');
+            for (var i = 0; i < videos.length; i++) {
+              var label = videos[i].getAttribute('title') || videos[i].getAttribute('aria-label');
+              if (label && label.trim() && !isGenericJsTitle(label)) {
+                return label.trim();
+              }
+            }
+
+            var headline = document.querySelector('h1.entry-title') || 
+                           document.querySelector('h1.post-title') ||
+                           document.querySelector('h1.title') ||
+                           document.querySelector('.video-title');
+            if (headline && headline.innerText && headline.innerText.trim()) {
+              var txt = headline.innerText.trim();
+              if (!isGenericJsTitle(txt)) return txt;
+            }
+
+            // 2. Post Caption / Caption Description
+            var tiktokDesc = document.querySelector('[data-e2e="browse-video-desc"]') || 
+                             document.querySelector('[class*="StyledCaption"]') ||
+                             document.querySelector('.tiktok-video-desc');
+            if (tiktokDesc && tiktokDesc.innerText && tiktokDesc.innerText.trim()) {
+              var txt = tiktokDesc.innerText.trim();
+              if (!isGenericJsTitle(txt)) return txt;
+            }
+            
+            var fbDesc = document.querySelector('[data-ad-preview="message"]') || 
+                         document.querySelector('[class*="styled-text"]') ||
+                         document.querySelector('.post_message') ||
+                         document.querySelector('[data-testid="post_message"]');
+            if (fbDesc && fbDesc.innerText && fbDesc.innerText.trim()) {
+              var txt = fbDesc.innerText.trim();
+              if (!isGenericJsTitle(txt)) return txt;
+            }
+
+            // 3. Metadata Title (Open Graph / Twitter titles)
+            var ogTitle = document.querySelector('meta[property="og:title"]') || 
+                           document.querySelector('meta[name="twitter:title"]');
+            if (ogTitle && ogTitle.content && ogTitle.content.trim()) {
+              var txt = ogTitle.content.trim();
+              if (!isGenericJsTitle(txt)) return txt;
+            }
+
+            // 4. Page Title
+            var t = document.title || "";
+            if (t) {
+              t = t.replace(/\s*-\s*YouTube/gi, "");
+              t = t.replace(/\s*\|\s*Facebook/gi, "");
+              t = t.replace(/\s*-\s*TikTok/gi, "");
+              t = t.replace(/\s*-\s*Instagram/gi, "");
+              t = t.trim();
+              if (t && !isGenericJsTitle(t)) {
+                return t;
+              }
+            }
+            return "Video Playback Theme";
+          }
+
+          function checkVideos() {
+            var videos = document.querySelectorAll('video');
+            var anyPlaying = false;
+            var anyStarted = false;
+            var allEnded = true;
+            var activeSrc = "";
+            var activeTitle = getCleanPageTitle();
+
+            var activeDuration = 0.0;
+            if (videos.length > 0) {
+              for (var i = 0; i < videos.length; i++) {
+                var v = videos[i];
+                if (!v.paused && !v.ended) {
+                  anyPlaying = true;
+                }
+                if (v.currentTime > 0.1 && !v.ended) {
+                  anyStarted = true;
+                }
+                if (!v.ended) {
+                  allEnded = false;
+                }
+                if (!v.paused && (v.src || v.currentSrc)) {
+                  activeSrc = v.src || v.currentSrc || "";
+                  activeDuration = v.duration || 0.0;
+                }
+              }
+              if (activeDuration === 0.0 && videos[0]) {
+                activeDuration = videos[0].duration || 0.0;
+              }
+            } else {
+              allEnded = false;
+            }
+
+            var isPlaybackActive = anyPlaying || (anyStarted && !allEnded);
+
+            if (window.VideoPlayObserver) {
+              window.VideoPlayObserver.onVideoState(isPlaybackActive, activeTitle, activeSrc, activeDuration);
+            }
+          }
+
+          function setupListeners() {
+            var videos = document.querySelectorAll('video');
+            for (var i = 0; i < videos.length; i++) {
+              var v = videos[i];
+              if (!v.hasAttribute('data-play-listener')) {
+                v.setAttribute('data-play-listener', 'true');
+                v.addEventListener('play', checkVideos);
+                v.addEventListener('playing', checkVideos);
+                v.addEventListener('pause', checkVideos);
+                v.addEventListener('ended', checkVideos);
+                v.addEventListener('timeupdate', checkVideos);
+              }
+            }
+          }
+
+          setupListeners();
+          checkVideos();
+
+          if (window.MutationObserver) {
+            var observer = new MutationObserver(function() {
+              setupListeners();
+              checkVideos();
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+          }
+
+          if (!window.videoCheckInterval) {
+            window.videoCheckInterval = setInterval(checkVideos, 1000);
+          }
+        })()
+    """.trimIndent()
+    webView.evaluateJavascript(js, null)
+}
+
+class VideoPlayObserver(
+    private val viewModel: BrowserViewModel,
+    private val tabId: String
+) {
+    @android.webkit.JavascriptInterface
+    fun onVideoState(isPlaying: Boolean, title: String, currentSrc: String, duration: Double) {
+        viewModel.onVideoPlaybackStateChanged(tabId, isPlaying, title, currentSrc, duration)
+    }
+
+    @android.webkit.JavascriptInterface
+    fun onVideoState(isPlaying: Boolean, title: String, currentSrc: String) {
+        viewModel.onVideoPlaybackStateChanged(tabId, isPlaying, title, currentSrc, 0.0)
     }
 }

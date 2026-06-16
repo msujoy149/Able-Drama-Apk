@@ -46,6 +46,19 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.text.DecimalFormat
 
+private fun Context.getClipboardManager(): ClipboardManager? {
+    val attributionContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+        try {
+            this.createAttributionContext("abledrama-attribution")
+        } catch (t: Throwable) {
+            this
+        }
+    } else {
+        this
+    }
+    return attributionContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+}
+
 // Helper function to resolve physical path from SAF tree URI
 fun getPathFromTreeUri(context: Context, uri: Uri): String? {
     try {
@@ -394,7 +407,7 @@ fun DownloadFileDialog(
                     Spacer(modifier = Modifier.width(8.dp))
                     IconButton(
                         onClick = {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            val clipboard = context.getClipboardManager()
                             val clipData = clipboard?.primaryClip
                             if (clipData != null && clipData.itemCount > 0) {
                                 val paste = clipData.getItemAt(0).text?.toString() ?: ""
@@ -1587,10 +1600,12 @@ fun DownloadManagerDialog(
                 dismissButton = {
                     TextButton(onClick = {
                         try {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            val clip = android.content.ClipData.newPlainText("Download Path", displayPath)
-                            clipboard.setPrimaryClip(clip)
-                            Toast.makeText(context, "Path copied to clipboard!", Toast.LENGTH_SHORT).show()
+                            val clipboard = context.getClipboardManager()
+                            if (clipboard != null) {
+                                val clip = android.content.ClipData.newPlainText("Download Path", displayPath)
+                                clipboard.setPrimaryClip(clip)
+                                Toast.makeText(context, "Path copied to clipboard!", Toast.LENGTH_SHORT).show()
+                            }
                         } catch (e: Exception) {
                             e.printStackTrace()
                         }

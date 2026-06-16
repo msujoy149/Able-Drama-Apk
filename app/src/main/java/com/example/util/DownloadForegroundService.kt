@@ -16,6 +16,11 @@ import kotlinx.coroutines.*
 import java.io.File
 
 class DownloadForegroundService : Service() {
+
+    override fun getAttributionTag(): String? {
+        return "abledrama-attribution"
+    }
+
     private val TAG = "DownloadForegroundService"
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var updateJob: Job? = null

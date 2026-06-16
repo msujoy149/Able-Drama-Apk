@@ -96,6 +96,17 @@ class BrowserViewModel(
         _isDarkTheme.value = isDark
     }
 
+    private val _isDesktopModeEnabled = MutableStateFlow(sharedPreferences.getBoolean("browser_desktop_mode", false))
+    val isDesktopModeEnabled: StateFlow<Boolean> = _isDesktopModeEnabled.asStateFlow()
+
+    fun setDesktopModeEnabled(enabled: Boolean) {
+        _isDesktopModeEnabled.value = enabled
+        sharedPreferences.edit().putBoolean("browser_desktop_mode", enabled).apply()
+        if (!_isDramaModeActive.value) {
+            reload()
+        }
+    }
+
     companion object {
         const val PRIMARY_URL = "https://www.abledrama.top"
         const val SECONDARY_URL = "https://www.abledrama.top"
@@ -121,20 +132,18 @@ class BrowserViewModel(
 
     fun setDramaModeActive(active: Boolean) {
         _isDramaModeActive.value = active
-        if (active) {
-            val currentList = _browserTabs.value
-            val cleanedList = currentList.filter { !isAbleDramaUrl(it.url) }
-            if (cleanedList.size != currentList.size) {
-                if (cleanedList.isEmpty()) {
-                    val newId = UUID.randomUUID().toString()
-                    _browserTabs.value = listOf(BrowserTab(id = newId, url = "browser://home", title = "Home"))
-                    _browserSelectedTabId.value = newId
-                } else {
-                    _browserTabs.value = cleanedList
-                    val currentSelectedId = _browserSelectedTabId.value
-                    if (cleanedList.none { it.id == currentSelectedId }) {
-                        _browserSelectedTabId.value = cleanedList.first().id
-                    }
+        val currentList = _browserTabs.value
+        val cleanedList = currentList.filter { !isAbleDramaUrl(it.url) }
+        if (cleanedList.size != currentList.size || cleanedList.isEmpty()) {
+            if (cleanedList.isEmpty()) {
+                val newId = "browser_initial_tab_" + UUID.randomUUID().toString().take(6)
+                _browserTabs.value = listOf(BrowserTab(id = newId, url = "browser://home", title = "Home"))
+                _browserSelectedTabId.value = newId
+            } else {
+                _browserTabs.value = cleanedList
+                val currentSelectedId = _browserSelectedTabId.value
+                if (cleanedList.none { it.id == currentSelectedId }) {
+                    _browserSelectedTabId.value = cleanedList.last().id
                 }
             }
         }
@@ -213,8 +222,135 @@ class BrowserViewModel(
     val detectedResources: StateFlow<Map<String, List<DetectedResource>>> = _detectedResources.asStateFlow()
 
     val currentDetectedResources: StateFlow<List<DetectedResource>> = combine(_detectedResources, selectedTabId) { map, activeId ->
-        map[activeId] ?: emptyList()
+        val list = map[activeId] ?: emptyList()
+        list.filter { isValidVideoResource(it.url, it.title) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Tracks if a video is actively playing on each tab
+    private val _isVideoPlayingMap = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val isVideoPlaying: StateFlow<Boolean> = combine(_isVideoPlayingMap, selectedTabId) { map, activeId ->
+        map[activeId] ?: false
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    // Tracks the clean extracted video/page title for each tab
+    private val _activeVideoTitleMap = MutableStateFlow<Map<String, String>>(emptyMap())
+    val activeVideoTitleMap: StateFlow<Map<String, String>> = _activeVideoTitleMap.asStateFlow()
+
+    // Tracks the active video duration for each tab
+    private val _activeVideoDurationMap = MutableStateFlow<Map<String, Double>>(emptyMap())
+    val activeVideoDurationMap: StateFlow<Map<String, Double>> = _activeVideoDurationMap.asStateFlow()
+
+    fun isGenericTitle(title: String): Boolean {
+        val t = title.lowercase().trim()
+        val keywords = listOf("collect", "config", "stream", "resource", "blob", "unknown", "videoplayback", "video_stream", "video-cdn")
+        if (keywords.any { t == it || t.contains(it) }) return true
+        return t.isBlank() ||
+               t == "video element" ||
+               t == "video stream source" ||
+               t == "video link" ||
+               t == "video media resource" ||
+               t == "video resource" ||
+               t == "video" ||
+               t == "video.mp4" ||
+               t == "stream.m3u8" ||
+               t == "resource_001" ||
+               t == "unknown_video" ||
+               t == "video_001" ||
+               t == "resource_xxx"
+    }
+
+    fun isValidVideoResource(url: String, title: String): Boolean {
+        val urlLower = url.lowercase()
+        val titleLower = title.lowercase().trim()
+
+        val forbiddenTitles = listOf("collect", "config", "unknown", "stream", "blob", "resource", "video_001", "resource_xxx")
+        if (forbiddenTitles.any { titleLower == it || titleLower.contains(it) }) {
+            return false
+        }
+
+        val excludeKeywords = listOf(
+            "analytics", "telemetry", "metrics", "collect", "tracker", "logging", "logger", 
+            "google-analytics", "doubleclick", "googlesyndication", "/ad", "popads", "popcash", 
+            "config", "settings", "manifest.json", "manifest.mpd", "hotkeys", "caption", 
+            "subtitles", "playlog", "ping", "/v1/logs", "youtubei/v1", "/log_event", "pagead",
+            "favicon.ico", "adsystem", "exoclick", "clck.ru", "stat", "beacon", "pixel",
+            "/fragment", "-fragment", "_fragment",
+            "/chunk", "-chunk", "_chunk",
+            "/segment", "-segment", "_segment",
+            "m3u8_audio", ".aac", ".ts", ".vtt", "audio-only", "/audio/", "range="
+        )
+
+        for (kw in excludeKeywords) {
+            if (urlLower.contains(kw)) {
+                if (urlLower.contains("videoplayback")) {
+                    if (urlLower.contains("mime=audio")) {
+                        return false
+                    }
+                } else {
+                    return false
+                }
+            }
+        }
+
+        val extensions = listOf(".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".3gp", ".m4v", ".wmv", ".mpeg", ".m3u8")
+        val isVideoExt = extensions.any { urlLower.substringBefore("?").endsWith(it) }
+        val isVideoStream = urlLower.contains("videoplayback") || 
+                            urlLower.contains("video_stream") || 
+                            urlLower.contains("video-cdn") ||
+                            urlLower.contains("googlevideo.com") ||
+                            urlLower.contains("tiktok") ||
+                            urlLower.contains("fbcdn.net") ||
+                            (urlLower.contains("/video/") && !urlLower.substringBefore("?").endsWith(".html"))
+
+        return isVideoExt || isVideoStream
+    }
+
+    fun isDownloadablePage(url: String): Boolean {
+        val cleanUrl = url.lowercase().trim()
+        if (cleanUrl.isBlank()) return false
+        
+        val uri = try { android.net.Uri.parse(cleanUrl) } catch(e: Exception) { null }
+        val host = uri?.host ?: ""
+        val path = uri?.path ?: ""
+        
+        if (host.contains("youtube.com") || host.contains("youtu.be")) {
+            if (path == "/" || path.isBlank()) return false
+            if (path.contains("/results")) return false
+            if (path.contains("/feed/")) return false
+        }
+        
+        if (host.contains("facebook.com")) {
+            if (path == "/" || path.isBlank()) return false
+            if (path.contains("/search")) return false
+            if (path.contains("/home") || path.contains("/feed")) return false
+        }
+        
+        if (host.contains("tiktok.com")) {
+            if (path == "/" || path.isBlank() || path == "/explore") return false
+            if (path.contains("/search")) return false
+        }
+        
+        if (host.contains("instagram.com")) {
+            if (path == "/" || path.isBlank() || path == "/explore" || (path.contains("/reels") && path.length < 10)) return false
+            if (path.contains("/search") || path.contains("/direct")) return false
+        }
+
+        if (host.contains("vimeo.com")) {
+            if (path == "/" || path.isBlank() || path == "/watch") return false
+            if (path.contains("/search")) return false
+        }
+
+        if (host.contains("dailymotion.com")) {
+            if (path == "/" || path.isBlank()) return false
+            if (path.contains("/search") || path.contains("/library") || path.contains("/news")) return false
+        }
+        
+        if (host.contains("google.com")) {
+            if (path.contains("/search") || path == "/" || path.isBlank()) return false
+        }
+
+        return true
+    }
 
     fun clearDetectedResources(tabId: String) {
         _detectedResources.update { map ->
@@ -222,22 +358,105 @@ class BrowserViewModel(
                 remove(tabId)
             }
         }
+        _isVideoPlayingMap.update { map ->
+            map.toMutableMap().apply {
+                remove(tabId)
+            }
+        }
+        _activeVideoTitleMap.update { map ->
+            map.toMutableMap().apply {
+                remove(tabId)
+            }
+        }
+        _activeVideoDurationMap.update { map ->
+            map.toMutableMap().apply {
+                remove(tabId)
+            }
+        }
+    }
+
+    fun onVideoPlaybackStateChanged(tabId: String, isPlaying: Boolean, activeTitle: String, activeSrc: String, duration: Double = 0.0) {
+        _isVideoPlayingMap.update { map ->
+            map.toMutableMap().apply {
+                put(tabId, isPlaying)
+            }
+        }
+        if (duration > 0.0) {
+            _activeVideoDurationMap.update { map ->
+                map.toMutableMap().apply {
+                    put(tabId, duration)
+                }
+            }
+        }
+        if (activeTitle.isNotBlank()) {
+            _activeVideoTitleMap.update { map ->
+                map.toMutableMap().apply {
+                    put(tabId, activeTitle)
+                }
+            }
+            // Update any existing detected resources with a generic title on this tab
+            _detectedResources.update { map ->
+                val list = map[tabId] ?: emptyList()
+                val updatedList = list.map { res ->
+                    if (isGenericTitle(res.title)) {
+                        res.copy(title = activeTitle)
+                    } else {
+                        res
+                    }
+                }
+                map.toMutableMap().apply {
+                    put(tabId, updatedList)
+                }
+            }
+        }
+        if (activeSrc.isNotBlank() && activeSrc.startsWith("http")) {
+            val playRes = DetectedResource(
+                url = activeSrc,
+                title = if (activeTitle.isNotBlank()) activeTitle else "Video Playback Name",
+                fileType = "Video",
+                quality = if (activeSrc.contains(".m3u8")) "HLS Playlist" else "720p",
+                fileSize = 0L
+            )
+            addDetectedResource(tabId, playRes)
+        }
     }
 
     fun addDetectedResource(tabId: String, resource: DetectedResource) {
+        if (!isValidVideoResource(resource.url, resource.title)) {
+            return
+        }
+
         // Log/Register detected resources globally in the download recovery engine
         try {
             com.example.util.DownloadEngine.registerDetectedUrl(resource.title, resource.url)
         } catch (e: Exception) {
             e.printStackTrace()
         }
+
+        // If the resource being added has a generic title and we have a non-generic activeTitle for this tab, use it!
+        val activeTitle = _activeVideoTitleMap.value[tabId]
+        val resolvedResource = if (!activeTitle.isNullOrBlank() && isGenericTitle(resource.title)) {
+            resource.copy(title = activeTitle)
+        } else {
+            resource
+        }
+
         _detectedResources.update { map ->
             val list = map[tabId] ?: emptyList()
-            if (list.any { it.url == resource.url }) {
-                map
+            if (list.any { it.url == resolvedResource.url }) {
+                val updatedList = list.map {
+                    if (it.url == resolvedResource.url && isGenericTitle(it.title) && !isGenericTitle(resolvedResource.title)) {
+                        it.copy(title = resolvedResource.title)
+                    } else {
+                        it
+                    }
+                }
+                map.toMutableMap().apply {
+                    put(tabId, updatedList)
+                }
             } else {
                 map.toMutableMap().apply {
-                    put(tabId, list + resource)
+                    put(tabId, list + resolvedResource)
                 }
             }
         }
@@ -313,8 +532,23 @@ class BrowserViewModel(
     // Direct interface actions to open browser home & pages safely
     fun openBrowserToHome() {
         setDramaModeActive(false)
-        if (_browserTabs.value.isEmpty()) {
-            val newId = UUID.randomUUID().toString()
+        val currentList = _browserTabs.value
+        val activeId = _browserSelectedTabId.value
+        val activeTab = currentList.find { it.id == activeId }
+        
+        if (activeTab != null) {
+            // Tab already active and valid, keep session intact!
+            if (activeTab.url == "browser://home") {
+                _commands.tryEmit(WebViewCommand.LoadUrl(activeId, "browser://home"))
+            }
+        } else if (currentList.isNotEmpty()) {
+            val lastTab = currentList.last()
+            _browserSelectedTabId.value = lastTab.id
+            if (lastTab.url == "browser://home") {
+                _commands.tryEmit(WebViewCommand.LoadUrl(lastTab.id, "browser://home"))
+            }
+        } else {
+            val newId = "browser_initial_tab_" + UUID.randomUUID().toString().take(6)
             val newTab = BrowserTab(id = newId, url = "browser://home", title = "Home")
             _browserTabs.value = listOf(newTab)
             _browserSelectedTabId.value = newId

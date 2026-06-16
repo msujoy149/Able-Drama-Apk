@@ -110,7 +110,26 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+private fun Context.getClipboardManager(): ClipboardManager? {
+    val attributionContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+        try {
+            this.createAttributionContext("abledrama-attribution")
+        } catch (t: Throwable) {
+            this
+        }
+    } else {
+        this
+    }
+    return attributionContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+}
+
 class MainActivity : ComponentActivity() {
+
+    override fun getAttributionTag(): String? {
+        return "abledrama-attribution"
+    }
+
+    private var clipboardObserver: ClipboardObserver? = null
 
     companion object {
         var isAbleDramaActive: Boolean = true
@@ -133,7 +152,16 @@ class MainActivity : ComponentActivity() {
 
         private val listener = ClipboardManager.OnPrimaryClipChangedListener {
             handler.removeCallbacks(checkClipboardRunnable)
-            handler.postDelayed(checkClipboardRunnable, 80)
+            handler.postDelayed(checkClipboardRunnable, 500)
+        }
+
+        fun triggerCheck(delayMs: Long = 500) {
+            handler.removeCallbacks(checkClipboardRunnable)
+            if (delayMs > 0) {
+                handler.postDelayed(checkClipboardRunnable, delayMs)
+            } else {
+                handler.post(checkClipboardRunnable)
+            }
         }
 
         override fun onStateChanged(source: LifecycleOwner, event: Lifecycle.Event) {
@@ -141,7 +169,7 @@ class MainActivity : ComponentActivity() {
                 Lifecycle.Event.ON_RESUME -> {
                     isResumed = true
                     try {
-                        val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        val clipboard = activity.getClipboardManager()
                         clipboard?.addPrimaryClipChangedListener(listener)
                     } catch (t: Throwable) {
                         android.util.Log.e("ClipboardObserver", "Failed to add primary clip listener", t)
@@ -150,7 +178,7 @@ class MainActivity : ComponentActivity() {
                 Lifecycle.Event.ON_PAUSE -> {
                     isResumed = false
                     try {
-                        val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        val clipboard = activity.getClipboardManager()
                         clipboard?.removePrimaryClipChangedListener(listener)
                         handler.removeCallbacks(checkClipboardRunnable)
                     } catch (t: Throwable) {
@@ -167,10 +195,11 @@ class MainActivity : ComponentActivity() {
 
         private fun checkClipboard() {
             if (!isResumed) return
+            if (!activity.hasWindowFocus()) return
             if (!MainActivity.isAbleDramaActive) return
 
             try {
-                val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+                val clipboard = activity.getClipboardManager() ?: return
                 if (!clipboard.hasPrimaryClip()) return
                 val clipData = try {
                     clipboard.primaryClip
@@ -273,14 +302,16 @@ class MainActivity : ComponentActivity() {
         browserViewModel = androidx.lifecycle.ViewModelProvider(this, viewModelFactory)[BrowserViewModel::class.java]
 
         // Register our specialized lifecycle-aware ClipboardObserver for redirection
-        lifecycle.addObserver(ClipboardObserver(this) { urlCandidate ->
+        val observer = ClipboardObserver(this) { urlCandidate ->
             android.util.Log.d("ClipboardRedirection", "Redirecting internally to URL: $urlCandidate")
             runOnUiThread {
                 Toast.makeText(this@MainActivity, "Opening copied link...", Toast.LENGTH_SHORT).show()
                 browserViewModel?.openUrlInBrowser(urlCandidate)
                 browserViewModel?.triggerOpenBrowser()
             }
-        })
+        }
+        clipboardObserver = observer
+        lifecycle.addObserver(observer)
 
         setContent {
             val context = LocalContext.current
@@ -444,6 +475,13 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         hideVideoFullscreen()
     }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            clipboardObserver?.triggerCheck(500)
+        }
+    }
 }
 
 enum class AppTab {
@@ -522,6 +560,7 @@ fun MainAppContent(
     val dramaTabsList by viewModel.dramaTabs.collectAsStateWithLifecycle()
     val dramaSelectedTabId by viewModel.dramaSelectedTabId.collectAsStateWithLifecycle()
     val requestSearchFocus by viewModel.requestSearchFocus.collectAsStateWithLifecycle()
+    val isDesktopModeEnabled by viewModel.isDesktopModeEnabled.collectAsStateWithLifecycle()
     val urlBarFocusRequester = remember { FocusRequester() }
 
     var isTabGridVisible by remember { mutableStateOf(false) }
@@ -540,6 +579,9 @@ fun MainAppContent(
     var showTelegramDialog by remember { mutableStateOf(false) }
     var showExitDialog by remember { mutableStateOf(false) }
     val currentDetectedResources by viewModel.currentDetectedResources.collectAsStateWithLifecycle()
+    val isVideoPlaying by viewModel.isVideoPlaying.collectAsStateWithLifecycle()
+    val activeVideoDurationMap by viewModel.activeVideoDurationMap.collectAsStateWithLifecycle()
+    val activeDuration = activeVideoDurationMap[selectedTabId] ?: 0.0
     var showDetectedResourcesSheet by remember { mutableStateOf(false) }
 
     fun pushToHistory() {
@@ -1009,6 +1051,7 @@ fun MainAppContent(
                                                 tabId = tab.id,
                                                 isVisible = isThisTabVisible,
                                                 isDarkTheme = isDarkTheme,
+                                                isDesktopModeAllowed = true,
                                                 onShowCustomView = onShowCustomView,
                                                 onHideCustomView = onHideCustomView,
                                                 modifier = Modifier.fillMaxSize().testTag("browser_web_view_${tab.id}"),
@@ -1091,29 +1134,7 @@ fun MainAppContent(
 
                             // Floating Download Button on the right-middle side of the screen
                             androidx.compose.animation.AnimatedVisibility(
-                                visible = currentDetectedResources.isNotEmpty() && run {
-                                    val urlLower = currentUrl.lowercase().substringBefore("?")
-                                    val isNonVideoFile = urlLower.endsWith(".pdf") || 
-                                                         urlLower.endsWith(".epub") ||
-                                                         urlLower.endsWith(".docx") ||
-                                                         urlLower.endsWith(".xlsx") ||
-                                                         urlLower.endsWith(".txt") ||
-                                                         urlLower.endsWith(".doc") ||
-                                                         urlLower.endsWith(".xls") ||
-                                                         urlLower.endsWith(".jpg") || 
-                                                         urlLower.endsWith(".jpeg") || 
-                                                         urlLower.endsWith(".png") || 
-                                                         urlLower.endsWith(".gif") || 
-                                                         urlLower.endsWith(".webp") || 
-                                                         urlLower.endsWith(".mp3") || 
-                                                         urlLower.endsWith(".wav") || 
-                                                         urlLower.endsWith(".m4a") || 
-                                                         urlLower.endsWith(".aac") ||
-                                                         urlLower.endsWith(".zip") || 
-                                                         urlLower.endsWith(".rar") || 
-                                                         urlLower.endsWith(".apk")
-                                    !isNonVideoFile
-                                },
+                                visible = isVideoPlaying && currentDetectedResources.isNotEmpty() && viewModel.isDownloadablePage(currentUrl),
                                 enter = fadeIn() + scaleIn(),
                                 exit = fadeOut() + scaleOut(),
                                 modifier = Modifier
@@ -1125,14 +1146,7 @@ fun MainAppContent(
                                     modifier = Modifier
                                         .size(56.dp)
                                         .clickable {
-                                            if (currentDetectedResources.size == 1) {
-                                                val res = currentDetectedResources.first()
-                                                downloadPendingUrl = res.url
-                                                downloadPendingName = res.title
-                                                showDownloadFileDialog = true
-                                            } else {
-                                                showDetectedResourcesSheet = true
-                                            }
+                                            showDetectedResourcesSheet = true
                                         }
                                         .testTag("floating_download_resources_btn"),
                                     shape = CircleShape,
@@ -1235,34 +1249,64 @@ fun MainAppContent(
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 24.dp)
-                        .clip(RoundedCornerShape(20.dp)),
+                        .padding(horizontal = 20.dp)
+                        .clip(RoundedCornerShape(24.dp)),
                     color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 6.dp
+                    tonalElevation = 8.dp
                 ) {
+                    val analyzedVideoQualities = remember { mutableStateMapOf<String, List<com.example.util.VideoQualityOption>>() }
+                    var isAnalyzingVideo by remember { mutableStateOf(false) }
+
+                    LaunchedEffect(currentDetectedResources, activeDuration) {
+                        isAnalyzingVideo = true
+                        val grouped = currentDetectedResources.groupBy { it.title }
+                        for ((title, resources) in grouped) {
+                            val options = com.example.util.VideoAnalyzer.analyze(resources, activeDuration)
+                            analyzedVideoQualities[title] = options
+                        }
+                        isAnalyzingVideo = false
+                    }
+
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(20.dp)
+                            .padding(24.dp)
                     ) {
                         // Title row
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.CloudUpload,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(24.dp)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(
-                                text = if (currentDetectedResources.size == 1) "Single Media Detected" else "Detected Media (" + currentDetectedResources.size + ")",
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .background(
+                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                                        shape = RoundedCornerShape(12.dp)
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CloudUpload,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Video Ready To Download",
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Smart Quality Detection",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                )
+                            }
                             Spacer(modifier = Modifier.weight(1f))
                             IconButton(onClick = { showDetectedResourcesSheet = false }) {
                                 Icon(
@@ -1273,171 +1317,256 @@ fun MainAppContent(
                             }
                         }
 
-                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f), modifier = Modifier.padding(vertical = 12.dp))
+                        HorizontalDivider(
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f),
+                            modifier = Modifier.padding(vertical = 16.dp)
+                        )
 
-                        if (currentDetectedResources.size == 1) {
-                            val res = currentDetectedResources.first()
-                            Text(
-                                text = "One downloadable resource has been detected on this page. Tap the card below to configure and start your download.",
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                                modifier = Modifier.padding(bottom = 12.dp)
-                            )
-                            
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        downloadPendingUrl = res.url
-                                        downloadPendingName = res.title
-                                        showDownloadFileDialog = true
-                                        showDetectedResourcesSheet = false
-                                    },
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
-                                ),
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(16.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                        val groupedVideos = remember(currentDetectedResources) {
+                            currentDetectedResources.groupBy { it.title }
+                        }
+
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 420.dp),
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            items(groupedVideos.keys.toList()) { videoTitle ->
+                                val resourcesInGroup = groupedVideos[videoTitle] ?: emptyList()
+                                val qualities = analyzedVideoQualities[videoTitle] ?: emptyList()
+
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                                    ),
+                                    shape = RoundedCornerShape(16.dp),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(16.dp)
                                     ) {
-                                    Icon(
-                                        imageVector = Icons.Default.PlayArrow,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(28.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(14.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = res.title,
-                                            fontSize = 14.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = MaterialTheme.colorScheme.onSurface,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis
+                                            text = "VIDEO",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            letterSpacing = 1.2.sp
                                         )
                                         Spacer(modifier = Modifier.height(4.dp))
                                         Text(
-                                            text = res.fileType.substringBefore("/") + " • " + (if (!res.quality.isNullOrBlank()) res.quality else "Standard"),
-                                            fontSize = 11.sp,
-                                            color = MaterialTheme.colorScheme.primary
+                                            text = videoTitle,
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 3,
+                                            overflow = TextOverflow.Ellipsis,
+                                            lineHeight = 20.sp
                                         )
-                                    }
-                                }
-                            }
-                        } else {
-                            Text(
-                                text = "Multiple downloadable media links were found. Please select which item you wish to download:",
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                                modifier = Modifier.padding(bottom = 12.dp)
-                            )
 
-                            LazyColumn(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(max = 280.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                items(currentDetectedResources) { res ->
-                                    val accentColor = when (res.fileType) {
-                                        "Video" -> Color(0xFFE50914)
-                                        "Audio" -> Color(0xFF2196F3)
-                                        "Document" -> Color(0xFF4CAF50)
-                                        else -> Color(0xFFFF9800)
-                                    }
-                                    Card(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable {
-                                                downloadPendingUrl = res.url
-                                                downloadPendingName = res.title
-                                                showDownloadFileDialog = true
-                                                showDetectedResourcesSheet = false
-                                            },
-                                        colors = CardDefaults.cardColors(
-                                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                                        ),
-                                        shape = RoundedCornerShape(10.dp)
-                                    ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(10.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(34.dp)
-                                                    .clip(CircleShape)
-                                                    .background(accentColor.copy(alpha = 0.12f)),
-                                                contentAlignment = Alignment.Center
+                                        Spacer(modifier = Modifier.height(16.dp))
+
+                                        if (isAnalyzingVideo && qualities.isEmpty()) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.Center
                                             ) {
-                                                Icon(
-                                                    imageVector = if (res.fileType == "Video") Icons.Default.PlayArrow else Icons.Default.PlayArrow,
-                                                    contentDescription = null,
-                                                    tint = accentColor,
-                                                    modifier = Modifier.size(18.dp)
+                                                CircularProgressIndicator(
+                                                    modifier = Modifier.size(20.dp),
+                                                    strokeWidth = 2.dp,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Text(
+                                                    text = "Analyzing video qualities & sizes...",
+                                                    fontSize = 13.sp,
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                                                 )
                                             }
-
-                                            Spacer(modifier = Modifier.width(10.dp))
-
-                                            Column(modifier = Modifier.weight(1f)) {
+                                        } else if (qualities.isEmpty()) {
+                                            // Handle case if parsing yielded no streams (should fallback to basic resource)
+                                            val firstRes = resourcesInGroup.firstOrNull()
+                                            if (firstRes != null) {
+                                                Button(
+                                                    onClick = {
+                                                        com.example.util.VideoAnalyzer.startDirectDownload(
+                                                            context = context,
+                                                            url = firstRes.url,
+                                                            title = videoTitle,
+                                                            resolution = "Original",
+                                                            estimatedSize = 0L,
+                                                            downloadRepository = downloadRepository,
+                                                            scope = coroutineScope
+                                                        )
+                                                        showDetectedResourcesSheet = false
+                                                    },
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    shape = RoundedCornerShape(12.dp)
+                                                ) {
+                                                    Icon(imageVector = Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Text("Download Video")
+                                                }
+                                            } else {
                                                 Text(
-                                                    text = res.title,
-                                                    fontSize = 13.sp,
-                                                    fontWeight = FontWeight.Medium,
-                                                    color = MaterialTheme.colorScheme.onSurface,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
+                                                    text = "No compatible streams detected.",
+                                                    color = MaterialTheme.colorScheme.error,
+                                                    fontSize = 13.sp
                                                 )
-                                                Spacer(modifier = Modifier.height(2.dp))
+                                            }
+                                        } else if (qualities.size == 1) {
+                                            // SINGLE QUALITY VIDEOS
+                                            val option = qualities.first()
+                                            Column(modifier = Modifier.fillMaxWidth()) {
                                                 Row(
                                                     verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                    modifier = Modifier.padding(bottom = 12.dp)
                                                 ) {
-                                                    Surface(
-                                                        color = accentColor.copy(alpha = 0.08f),
-                                                        shape = RoundedCornerShape(4.dp)
-                                                    ) {
-                                                        Text(
-                                                            text = res.fileType.substringBefore("/").uppercase(),
-                                                            fontSize = 9.sp,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = accentColor,
-                                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                                        )
-                                                    }
-                                                    if (!res.quality.isNullOrBlank()) {
+                                                    Text(
+                                                        text = "Estimated Size:",
+                                                        fontSize = 13.sp,
+                                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text(
+                                                        text = option.displaySize,
+                                                        fontSize = 14.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = MaterialTheme.colorScheme.onSurface
+                                                    )
+                                                    if (option.format.isNotEmpty()) {
+                                                        Spacer(modifier = Modifier.width(8.dp))
                                                         Surface(
-                                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                                                            color = MaterialTheme.colorScheme.primaryContainer,
                                                             shape = RoundedCornerShape(4.dp)
                                                         ) {
                                                             Text(
-                                                                text = res.quality,
+                                                                text = option.format.uppercase(),
                                                                 fontSize = 9.sp,
                                                                 fontWeight = FontWeight.Bold,
-                                                                color = MaterialTheme.colorScheme.primary,
-                                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
                                                             )
                                                         }
                                                     }
                                                 }
+
+                                                Button(
+                                                    onClick = {
+                                                        com.example.util.VideoAnalyzer.startDirectDownload(
+                                                            context = context,
+                                                            url = option.url,
+                                                            title = videoTitle,
+                                                            resolution = option.resolution,
+                                                            estimatedSize = option.sizeBytes,
+                                                            downloadRepository = downloadRepository,
+                                                            scope = coroutineScope
+                                                        )
+                                                        showDetectedResourcesSheet = false
+                                                    },
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    colors = ButtonDefaults.buttonColors(
+                                                        containerColor = MaterialTheme.colorScheme.primary
+                                                    ),
+                                                    shape = RoundedCornerShape(12.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Download,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Text(
+                                                        text = "Download (${option.displaySize})",
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 14.sp
+                                                    )
+                                                }
                                             }
-
-                                            Spacer(modifier = Modifier.width(4.dp))
-
-                                            Icon(
-                                                imageVector = Icons.Default.Download,
-                                                contentDescription = "Download Item",
-                                                tint = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(20.dp)
+                                        } else {
+                                            // MULTI QUALITY VIDEOS
+                                            Text(
+                                                text = "AVAILABLE QUALITIES",
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                                                letterSpacing = 1.2.sp,
+                                                modifier = Modifier.padding(bottom = 8.dp)
                                             )
+                                            
+                                            Column(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                qualities.forEach { option ->
+                                                    Surface(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .clickable {
+                                                                com.example.util.VideoAnalyzer.startDirectDownload(
+                                                                    context = context,
+                                                                    url = option.url,
+                                                                    title = videoTitle,
+                                                                    resolution = option.resolution,
+                                                                    estimatedSize = option.sizeBytes,
+                                                                    downloadRepository = downloadRepository,
+                                                                    scope = coroutineScope
+                                                                )
+                                                                showDetectedResourcesSheet = false
+                                                            },
+                                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                                        shape = RoundedCornerShape(12.dp),
+                                                        border = BorderStroke(
+                                                            width = 1.dp,
+                                                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.1f)
+                                                        )
+                                                    ) {
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.Download,
+                                                                contentDescription = null,
+                                                                tint = MaterialTheme.colorScheme.primary,
+                                                                modifier = Modifier.size(16.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(12.dp))
+                                                            Text(
+                                                                text = option.resolution,
+                                                                fontSize = 14.sp,
+                                                                fontWeight = FontWeight.Bold,
+                                                                color = MaterialTheme.colorScheme.onSurface
+                                                            )
+                                                            Spacer(modifier = Modifier.width(6.dp))
+                                                            Text(
+                                                                text = "•  ${option.displaySize}",
+                                                                fontSize = 13.sp,
+                                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                                            )
+                                                            Spacer(modifier = Modifier.weight(1f))
+                                                            Surface(
+                                                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                                                shape = RoundedCornerShape(4.dp)
+                                                            ) {
+                                                                Text(
+                                                                    text = option.format.uppercase(),
+                                                                    fontSize = 9.sp,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1454,7 +1583,11 @@ fun MainAppContent(
                             TextButton(
                                 onClick = { showDetectedResourcesSheet = false }
                             ) {
-                                Text("CANCEL", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = "CANCEL", 
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), 
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         }
                     }
@@ -1817,6 +1950,8 @@ fun BrowserToolbar(
         }
     }
 
+    val isDesktopModeEnabled by viewModel.isDesktopModeEnabled.collectAsStateWithLifecycle()
+
     val finalBarColor = remember(parsedColor, currentUrl, isDarkTheme) {
         if (parsedColor != null) {
             parsedColor
@@ -2129,6 +2264,10 @@ fun BrowserToolbar(
                                 }
                                 val translateUrl = "https://translate.google.com/translate?sl=auto&tl=en&u=$encodedUrl"
                                 onUrlSubmit(translateUrl)
+                            },
+                            isDesktopModeEnabled = isDesktopModeEnabled,
+                            onDesktopModeToggle = {
+                                viewModel.setDesktopModeEnabled(!isDesktopModeEnabled)
                             }
                         )
                     }
@@ -2938,7 +3077,7 @@ fun MyAccountTab(
                                 IconButton(
                                     onClick = {
                                         try {
-                                            val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                            val clipboardManager = context.getClipboardManager()
                                             if (clipboardManager != null && clipboardManager.hasPrimaryClip()) {
                                                 val primaryClipText = clipboardManager.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
                                                 if (primaryClipText.isNotBlank()) {
@@ -4426,6 +4565,7 @@ fun BrowserMenuItem(
     label: String,
     testTag: String,
     isDarkTheme: Boolean,
+    trailingContent: @Composable (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
     Row(
@@ -4448,8 +4588,12 @@ fun BrowserMenuItem(
             text = label,
             color = if (isDarkTheme) Color.White else Color(0xFF202124),
             fontSize = 14.sp,
-            fontWeight = FontWeight.Normal
+            fontWeight = FontWeight.Normal,
+            modifier = Modifier.weight(1f)
         )
+        if (trailingContent != null) {
+            trailingContent()
+        }
     }
 }
 
@@ -4471,7 +4615,9 @@ fun BrowserActionMenuPopup(
     onToggleDarkTheme: () -> Unit,
     onNewTabClick: () -> Unit = {},
     onTranslateClick: () -> Unit = {},
-    onAboutClick: () -> Unit = {}
+    onAboutClick: () -> Unit = {},
+    isDesktopModeEnabled: Boolean = false,
+    onDesktopModeToggle: () -> Unit = {}
 ) {
     Dialog(
         onDismissRequest = onDismiss,
@@ -4681,6 +4827,28 @@ fun BrowserActionMenuPopup(
                         onClick = {
                             onDismiss()
                             onTranslateClick()
+                        }
+                    )
+
+                    BrowserMenuItem(
+                        icon = Icons.Default.Laptop,
+                        label = "Desktop Mode",
+                        testTag = "browser_menu_desktop_mode",
+                        isDarkTheme = isDarkTheme,
+                        trailingContent = {
+                            Checkbox(
+                                checked = isDesktopModeEnabled,
+                                onCheckedChange = null,
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = if (isDarkTheme) CinemaRed else MaterialTheme.colorScheme.primary,
+                                    uncheckedColor = if (isDarkTheme) Color(0xFFE6E1E5) else Color(0xFF5F6368)
+                                ),
+                                modifier = Modifier.testTag("browser_menu_desktop_mode_checkbox")
+                            )
+                        },
+                        onClick = {
+                            onDismiss()
+                            onDesktopModeToggle()
                         }
                     )
 
