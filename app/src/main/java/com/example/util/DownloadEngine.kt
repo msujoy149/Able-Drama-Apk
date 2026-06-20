@@ -122,6 +122,27 @@ object DownloadEngine {
         // Cancel previous notifications for this itemId if any
         DownloadForegroundService.cancelDownloadNotification(context, itemId)
 
+        // Ask for battery optimization exemption once directly if not already whitelisted
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+            if (pm != null && !pm.isIgnoringBatteryOptimizations(context.packageName)) {
+                val prefs = context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE)
+                val prompted = prefs.getBoolean("battery_prompted_once", false)
+                if (!prompted) {
+                    try {
+                        val intent = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                            data = android.net.Uri.parse("package:${context.packageName}")
+                            flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        context.startActivity(intent)
+                        prefs.edit().putBoolean("battery_prompted_once", true).apply()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Direct ignore battery optimization prompt was blocked or unhandled", e)
+                    }
+                }
+            }
+        }
+
         // Start the Foreground service
         try {
             val serviceIntent = android.content.Intent(context, DownloadForegroundService::class.java).apply {
@@ -382,6 +403,11 @@ object DownloadEngine {
                             connection = url.openConnection() as HttpURLConnection
                             connection.connectTimeout = 15000
                             connection.readTimeout = 15000
+                            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                            val userCookies = currentItem?.cookies ?: item.cookies
+                            if (userCookies.isNotBlank()) {
+                                connection.setRequestProperty("Cookie", userCookies)
+                            }
                             connection.setRequestProperty("Range", "bytes=$requestStart-$endByte")
                             connection.connect()
 
@@ -394,8 +420,8 @@ object DownloadEngine {
                             raf = RandomAccessFile(partFiles[i], "rw")
                             raf.seek(currentPartDownloaded)
 
-                            // 16KB buffer size for optimized network responses
-                            val buffer = ByteArray(16384)
+                            // 32KB buffer size for optimized network responses (prevents context switching & limits bottlenecking)
+                            val buffer = ByteArray(32768)
                             var bytesRead: Int
                             
                             while (isActive) {
@@ -581,6 +607,11 @@ object DownloadEngine {
                 connection = url.openConnection() as HttpURLConnection
                 connection.connectTimeout = 15000
                 connection.readTimeout = 15000
+                connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                val userCookies = currentItem?.cookies ?: item.cookies
+                if (userCookies.isNotBlank()) {
+                    connection.setRequestProperty("Cookie", userCookies)
+                }
 
                 if (totalDownloaded > 0) {
                     connection.setRequestProperty("Range", "bytes=$totalDownloaded-")
@@ -609,7 +640,8 @@ object DownloadEngine {
 
                 consecutiveErrors = 0 // Reset error counter on successful connect/read
 
-                val buffer = ByteArray(32768)
+                // 64KB buffer size for high-speed single-connection downloads
+                val buffer = ByteArray(65536)
                 var bytesRead: Int
 
                 while (isActive) {
@@ -719,6 +751,49 @@ object DownloadEngine {
                 )
                 repo.updateDownload(pausedItem)
                 appContext?.let { DownloadForegroundService.showPausedNotification(it, pausedItem) }
+            }
+            appContext?.let { triggerNextDownload(it) }
+        }
+    }
+
+    fun cancelDownload(itemId: Long) {
+        val job = activeJobs.remove(itemId)
+        if (job != null) {
+            job.cancel()
+        }
+        
+        CoroutineScope(Dispatchers.IO).launch {
+            val repo = repository ?: return@launch
+            val item = repo.getDownloadById(itemId)
+            if (item != null) {
+                val canceledItem = item.copy(
+                    status = "PAUSED",
+                    progress = 0f,
+                    bytesDownloaded = 0L,
+                    downloadSpeed = "Canceled",
+                    eta = "--"
+                )
+                repo.updateDownload(canceledItem)
+                
+                // Free OS memory logs and remove physical payload fragments to avoid visual corrupted resuming
+                try {
+                    val destFile = File(item.filePath)
+                    if (destFile.exists()) {
+                        destFile.delete()
+                    }
+                    val numParts = 4
+                    for (i in 0 until numParts) {
+                        val partFile = File(item.filePath + ".part$i")
+                        if (partFile.exists()) {
+                            partFile.delete()
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed cleaning local storage for download item cancellation", e)
+                }
+                
+                // Clear state notifications immediately
+                appContext?.let { DownloadForegroundService.cancelDownloadNotification(it, itemId) }
             }
             appContext?.let { triggerNextDownload(it) }
         }

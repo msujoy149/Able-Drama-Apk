@@ -7,10 +7,21 @@ import android.os.StatFs
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.items
+import com.example.util.Adaptive
+import com.example.util.adaptiveClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.ui.draw.scale
+import androidx.compose.foundation.focusable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -36,6 +47,11 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
+import android.os.Build
 import com.example.data.DownloadItem
 import com.example.data.DownloadRepository
 import com.example.util.DownloadEngine
@@ -127,39 +143,51 @@ fun formatByteSize(bytes: Long): String {
 fun DownloadManagerTheme(content: @Composable () -> Unit) {
     val context = LocalContext.current
     val sharedPrefs = remember { context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE) }
-    val isDarkTheme = sharedPrefs.getBoolean("is_dark_theme", true)
+    var isDarkTheme by remember { androidx.compose.runtime.mutableStateOf(sharedPrefs.getBoolean("is_dark_theme", true)) }
 
-    val d0bcff = Color(0xFFD0BCFF)
+    androidx.compose.runtime.DisposableEffect(sharedPrefs) {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
+            if (key == "is_dark_theme") {
+                isDarkTheme = p.getBoolean("is_dark_theme", true)
+            }
+        }
+        sharedPrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose {
+            sharedPrefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }
+
+    val primaryAccent = Color(0xFFD0BCFF)
     
     val colorScheme = if (isDarkTheme) {
         darkColorScheme(
-            primary = d0bcff,
-            primaryContainer = Color(0xFF1C133A), // custom premium deep dark purple
-            onPrimary = Color(0xFF131317), // very dark background for light elements like FAB
-            onPrimaryContainer = d0bcff, // soft lilac text/icons on primary theme
-            secondary = d0bcff,
-            secondaryContainer = d0bcff.copy(alpha = 0.15f),
+            primary = primaryAccent,
+            primaryContainer = Color(0xFF1C133A), // custom premium deep dark purple container matching D0BCFF
+            onPrimary = Color(0xFF131317),
+            onPrimaryContainer = primaryAccent,
+            secondary = primaryAccent,
+            secondaryContainer = primaryAccent.copy(alpha = 0.15f),
             onSecondary = Color(0xFF131317),
-            onSecondaryContainer = d0bcff,
-            background = Color(0xFF08080A),
-            surface = Color(0xFF121217),
-            onBackground = Color(0xFFFFFFFF),
+            onSecondaryContainer = primaryAccent,
+            background = Color(0xFF0D1117), // Specifications Background: #0D1117
+            surface = Color(0xFF161B22), // Specifications Surface: #161B22
+            onBackground = Color(0xFFFFFFFF), // Specifications Text: #FFFFFF
             onSurface = Color(0xFFFFFFFF)
         )
     } else {
         lightColorScheme(
-            primary = d0bcff,
-            primaryContainer = d0bcff, // solid lilac background in light mode
+            primary = primaryAccent,
+            primaryContainer = primaryAccent,
             onPrimary = Color(0xFF131317),
             onPrimaryContainer = Color(0xFF131317),
-            secondary = d0bcff,
-            secondaryContainer = d0bcff.copy(alpha = 0.12f),
-            onSecondary = Color(0xFF131317),
-            onSecondaryContainer = Color(0xFF131317),
-            background = Color(0xFFF9F9FB),
-            surface = Color.White,
-            onBackground = Color(0xFF131317),
-            onSurface = Color(0xFF131317)
+            secondary = primaryAccent,
+            secondaryContainer = primaryAccent.copy(alpha = 0.12f),
+            onSecondary = Color(0xFF111827),
+            onSecondaryContainer = Color(0xFF111827),
+            background = Color(0xFFFFFFFF), // Specifications Background: #FFFFFF
+            surface = Color(0xFFF8FAFC), // Specifications Surface: #F8FAFC
+            onBackground = Color(0xFF111827), // Specifications Text: #111827
+            onSurface = Color(0xFF111827)
         )
     }
 
@@ -341,6 +369,7 @@ fun DownloadFileDialog(
         ) {
             Card(
                 modifier = Modifier
+                    .widthIn(max = 520.dp)
                     .fillMaxWidth()
                     .padding(16.dp)
                     .wrapContentHeight(),
@@ -954,6 +983,36 @@ fun DownloadManagerDialog(
         }
     }
 
+    // MULTI-SELECT SYSTEM STATE
+    var isSelectionModeActive by remember { mutableStateOf(false) }
+    val selectedItemIds = remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var showBulkDeleteConfirmation by remember { mutableStateOf(false) }
+
+    val bulkPermissionToCheck = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        android.Manifest.permission.READ_MEDIA_VIDEO
+    } else {
+        android.Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+
+    val bulkStoragePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        val sp = context.getSharedPreferences("download_prefs", Context.MODE_PRIVATE)
+        sp.edit().putBoolean("storage_permission_requested", true).apply()
+        
+        coroutineScope.launch(Dispatchers.IO) {
+            val selectedItems = filteredDownloads.filter { it.id in selectedItemIds.value }
+            selectedItems.forEach { item ->
+                performPermanentDeleteAction(context, item, downloadRepository)
+            }
+            launch(Dispatchers.Main) {
+                Toast.makeText(context, "Permanently deleted ${selectedItems.size} files", Toast.LENGTH_SHORT).show()
+                isSelectionModeActive = false
+                selectedItemIds.value = emptySet()
+            }
+        }
+    }
+
     var concurrentDownloadsLimit by remember { 
         mutableIntStateOf(sharedPrefs.getInt("concurrent_downloads_limit", 3)) 
     }
@@ -1041,238 +1100,279 @@ fun DownloadManagerDialog(
             properties = DialogProperties(usePlatformDefaultWidth = false)
         ) {
         androidx.activity.compose.BackHandler(
-            enabled = showConcurrentDownloadsDialog || showDownloadPathDialog || showBatteryOptimizationDialog || showSortDialog || showAppInfoDialog || showDownloadStatsDialog
+            enabled = showConcurrentDownloadsDialog || showDownloadPathDialog || showBatteryOptimizationDialog || showSortDialog || showAppInfoDialog || showDownloadStatsDialog || isSelectionModeActive
         ) {
-            showConcurrentDownloadsDialog = false
-            showDownloadPathDialog = false
-            showBatteryOptimizationDialog = false
-            showSortDialog = false
-            showAppInfoDialog = false
-            showDownloadStatsDialog = false
+            if (isSelectionModeActive) {
+                isSelectionModeActive = false
+                selectedItemIds.value = emptySet()
+            } else {
+                showConcurrentDownloadsDialog = false
+                showDownloadPathDialog = false
+                showBatteryOptimizationDialog = false
+                showSortDialog = false
+                showAppInfoDialog = false
+                showDownloadStatsDialog = false
+            }
         }
 
         Scaffold(
             modifier = Modifier.fillMaxSize(),
-            bottomBar = {
-                val isDarkTheme = remember { sharedPrefs.getBoolean("is_dark_theme", true) }
-                val goldAccent = Color(0xFFFFB300)
-                val redAccent = Color(0xFFE50914)
-                
-                Surface(
-                    tonalElevation = 8.dp,
-                    color = MaterialTheme.colorScheme.surface,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Button(
-                        onClick = onExitClick,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp)
-                            .height(48.dp)
-                            .testTag("download_manager_exit_button"),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isDarkTheme) goldAccent else redAccent,
-                            contentColor = if (isDarkTheme) Color.Black else Color.White
-                        ),
-                        shape = RoundedCornerShape(24.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Home,
-                                contentDescription = null,
-                                tint = if (isDarkTheme) Color.Black else Color.White,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Exit & Back to Home",
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isDarkTheme) Color.Black else Color.White
-                            )
-                        }
-                    }
-                }
-            },
             topBar = {
                 Column {
-                    TopAppBar(
-                        title = {
-                            Text(
-                                "Download Manager",
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        },
-                        navigationIcon = {
-                            IconButton(onClick = onDismissRequest) {
-                                Icon(imageVector = Icons.Default.Close, contentDescription = "Close Downloader")
-                            }
-                        },
-                        actions = {
-                            // Delete button (Clear downloads)
-                            IconButton(onClick = {
-                                coroutineScope.launch {
-                                    allDownloads.forEach {
-                                        if (it.status == "DOWNLOADING") {
-                                            DownloadEngine.pauseDownload(it.id)
-                                        }
-                                        downloadRepository.deleteDownload(it)
+                    if (isSelectionModeActive) {
+                        TopAppBar(
+                            title = {
+                                Text(
+                                    text = "Selected: ${selectedItemIds.value.size}",
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            },
+                            navigationIcon = {
+                                IconButton(onClick = {
+                                    isSelectionModeActive = false
+                                    selectedItemIds.value = emptySet()
+                                }) {
+                                    Icon(imageVector = Icons.Default.Close, contentDescription = "Exit Selection")
+                                }
+                            },
+                            actions = {
+                                val allShownIds = filteredDownloads.map { it.id }.toSet()
+                                val isAllSelected = selectedItemIds.value.containsAll(allShownIds) && allShownIds.isNotEmpty()
+                                
+                                // Beautiful intuitive Select All Button shown when some files are unselected
+                                if (!isAllSelected) {
+                                    TextButton(
+                                        onClick = {
+                                            selectedItemIds.value = allShownIds
+                                        },
+                                        colors = ButtonDefaults.textButtonColors(
+                                            contentColor = Color(0xFFD0BCFF)
+                                        )
+                                    ) {
+                                        Text(
+                                            text = "Select All",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 14.sp
+                                        )
                                     }
-                                    Toast.makeText(context, "All downloads cleared", Toast.LENGTH_SHORT).show()
                                 }
-                            }) {
-                                Icon(imageVector = Icons.Default.Delete, contentDescription = "Clear All")
-                            }
 
-                            // 3-dot Menu Toggle Button
-                            Box {
-                                IconButton(onClick = { showMenu = true }) {
-                                    Icon(imageVector = Icons.Default.MoreVert, contentDescription = "More Options")
+                                // Deselect All Button shown when some files are selected
+                                if (selectedItemIds.value.isNotEmpty()) {
+                                    TextButton(
+                                        onClick = {
+                                            selectedItemIds.value = emptySet()
+                                        },
+                                        colors = ButtonDefaults.textButtonColors(
+                                            contentColor = Color(0xFFD0BCFF)
+                                        )
+                                    ) {
+                                        Text(
+                                            text = "Deselect All",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 14.sp
+                                        )
+                                    }
                                 }
-                                DropdownMenu(
-                                    expanded = showMenu,
-                                    onDismissRequest = { showMenu = false }
+
+                                // Single unified delete icon button for selection mode
+                                IconButton(
+                                    onClick = {
+                                        if (selectedItemIds.value.isNotEmpty()) {
+                                            showBulkDeleteConfirmation = true
+                                        } else {
+                                            Toast.makeText(context, "No items selected to delete", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
                                 ) {
-                                    // DOWNLOAD SETTINGS
-                                    Text(
-                                        text = "Download Settings",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Maximum simultaneous downloads") },
-                                        leadingIcon = { Icon(Icons.Default.Layers, contentDescription = null) },
-                                        onClick = {
-                                            showMenu = false
-                                            showConcurrentDownloadsDialog = true
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Sort downloads order") },
-                                        leadingIcon = { Icon(Icons.Default.Sort, contentDescription = null) },
-                                        onClick = {
-                                            showMenu = false
-                                            showSortDialog = true
-                                        }
-                                    )
-                                    
-                                    HorizontalDivider()
-                                    // STORAGE SETTINGS
-                                    Text(
-                                        text = "Storage Settings",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Download location/path") },
-                                        leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null) },
-                                        onClick = {
-                                            showMenu = false
-                                            showDownloadPathDialog = true
-                                        }
-                                    )
-                                    
-                                    HorizontalDivider()
-                                    // BATTERY SETTINGS
-                                    Text(
-                                        text = "Battery Settings",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Battery & Background Performance") },
-                                        leadingIcon = { Icon(Icons.Default.BatteryChargingFull, contentDescription = null) },
-                                        onClick = {
-                                            showMenu = false
-                                            showBatteryOptimizationDialog = true
-                                        }
-                                    )
-                                    
-                                    HorizontalDivider()
-                                    // ADDITIONAL USEFUL OPTIONS
-                                    Text(
-                                        text = "Additional Options",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Download Statistics") },
-                                        leadingIcon = { Icon(Icons.Default.BarChart, contentDescription = null) },
-                                        onClick = {
-                                            showMenu = false
-                                            showDownloadStatsDialog = true
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Retry Failed Downloads") },
-                                        leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
-                                        onClick = {
-                                            showMenu = false
-                                            coroutineScope.launch {
-                                                val failedCount = allDownloads.count { it.status == "ERROR" }
-                                                allDownloads.forEach {
-                                                    if (it.status == "ERROR") {
-                                                        DownloadEngine.startDownload(context, it.id, this)
-                                                    }
-                                                }
-                                                Toast.makeText(context, "Retrying $failedCount failed downloads", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Clear Completed Downloads") },
-                                        leadingIcon = { Icon(Icons.Default.DoneAll, contentDescription = null) },
-                                        onClick = {
-                                            showMenu = false
-                                            coroutineScope.launch {
-                                                val completed = allDownloads.filter { it.status == "FINISHED" }
-                                                completed.forEach { downloadRepository.deleteDownload(it) }
-                                                Toast.makeText(context, "Cleared ${completed.size} completed items", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Clear Failed Downloads") },
-                                        leadingIcon = { Icon(Icons.Default.ErrorOutline, contentDescription = null) },
-                                        onClick = {
-                                            showMenu = false
-                                            coroutineScope.launch {
-                                                val failed = allDownloads.filter { it.status == "ERROR" }
-                                                failed.forEach { downloadRepository.deleteDownload(it) }
-                                                Toast.makeText(context, "Cleared ${failed.size} failed items", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-                                    )
-                                    
-                                    HorizontalDivider()
-                                    // APP INFO
-                                    DropdownMenuItem(
-                                        text = { Text("About & Version Info") },
-                                        leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
-                                        onClick = {
-                                            showMenu = false
-                                            showAppInfoDialog = true
-                                        }
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Delete Selected",
+                                        tint = MaterialTheme.colorScheme.error
                                     )
                                 }
-                            }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = MaterialTheme.colorScheme.primaryContainer
+                            )
                         )
-                    )
+                    } else {
+                        TopAppBar(
+                            title = {
+                                Text(
+                                    "Download Manager",
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            },
+                            navigationIcon = {
+                                IconButton(onClick = onDismissRequest) {
+                                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close Downloader")
+                                }
+                            },
+                            actions = {
+                                // Delete button (Clear downloads)
+                                IconButton(onClick = {
+                                    coroutineScope.launch {
+                                        allDownloads.forEach {
+                                            if (it.status == "DOWNLOADING") {
+                                                DownloadEngine.pauseDownload(it.id)
+                                            }
+                                            downloadRepository.deleteDownload(it)
+                                        }
+                                        Toast.makeText(context, "All downloads cleared", Toast.LENGTH_SHORT).show()
+                                    }
+                                }) {
+                                    Icon(imageVector = Icons.Default.Delete, contentDescription = "Clear All")
+                                }
+
+                                // 3-dot Menu Toggle Button
+                                Box {
+                                    IconButton(onClick = { showMenu = true }) {
+                                        Icon(imageVector = Icons.Default.MoreVert, contentDescription = "More Options")
+                                    }
+                                    DropdownMenu(
+                                        expanded = showMenu,
+                                        onDismissRequest = { showMenu = false }
+                                    ) {
+                                        // DOWNLOAD SETTINGS
+                                        Text(
+                                            text = "Download Settings",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Maximum simultaneous downloads") },
+                                            leadingIcon = { Icon(Icons.Default.Layers, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                showConcurrentDownloadsDialog = true
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Sort downloads order") },
+                                            leadingIcon = { Icon(Icons.Default.Sort, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                showSortDialog = true
+                                            }
+                                        )
+                                        
+                                        HorizontalDivider()
+                                        // STORAGE SETTINGS
+                                        Text(
+                                            text = "Storage Settings",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Download location/path") },
+                                            leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                showDownloadPathDialog = true
+                                            }
+                                        )
+                                        
+                                        HorizontalDivider()
+                                        // BATTERY SETTINGS
+                                        Text(
+                                            text = "Battery Settings",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Battery & Background Performance") },
+                                            leadingIcon = { Icon(Icons.Default.BatteryChargingFull, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                showBatteryOptimizationDialog = true
+                                            }
+                                        )
+                                        
+                                        HorizontalDivider()
+                                        // ADDITIONAL USEFUL OPTIONS
+                                        Text(
+                                            text = "Additional Options",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Download Statistics") },
+                                            leadingIcon = { Icon(Icons.Default.BarChart, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                showDownloadStatsDialog = true
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Retry Failed Downloads") },
+                                            leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                coroutineScope.launch {
+                                                    val failedCount = allDownloads.count { it.status == "ERROR" }
+                                                    allDownloads.forEach {
+                                                        if (it.status == "ERROR") {
+                                                            DownloadEngine.startDownload(context, it.id, this)
+                                                        }
+                                                    }
+                                                    Toast.makeText(context, "Retrying $failedCount failed downloads", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Clear Completed Downloads") },
+                                            leadingIcon = { Icon(Icons.Default.DoneAll, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                coroutineScope.launch {
+                                                    val completed = allDownloads.filter { it.status == "FINISHED" }
+                                                    completed.forEach { downloadRepository.deleteDownload(it) }
+                                                    Toast.makeText(context, "Cleared ${completed.size} completed items", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Clear Failed Downloads") },
+                                            leadingIcon = { Icon(Icons.Default.ErrorOutline, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                coroutineScope.launch {
+                                                    val failed = allDownloads.filter { it.status == "ERROR" }
+                                                    failed.forEach { downloadRepository.deleteDownload(it) }
+                                                    Toast.makeText(context, "Cleared ${failed.size} failed items", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        )
+                                        
+                                        HorizontalDivider()
+                                        // APP INFO
+                                        DropdownMenuItem(
+                                            text = { Text("About & Version Info") },
+                                            leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                showAppInfoDialog = true
+                                            }
+                                        )
+                                    }
+                                }
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = MaterialTheme.colorScheme.primaryContainer
+                            )
+                        )
+                    }
 
                     // Secondary Scrollable or Fixed Tabs row
                     SecondaryTabRow(
@@ -1358,21 +1458,128 @@ fun DownloadManagerDialog(
                         )
                     }
                 } else {
-                    LazyColumn(
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(Adaptive.getGridColumnCount()),
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(start = 12.dp, top = 12.dp, end = 12.dp, bottom = 88.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        contentPadding = PaddingValues(start = Adaptive.dynamicPadding(12.dp), top = Adaptive.dynamicPadding(12.dp), end = Adaptive.dynamicPadding(12.dp), bottom = 88.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         items(filteredDownloads, key = { it.id }) { item ->
+                            val isSelected = selectedItemIds.value.contains(item.id)
                             DownloadItemRow(
                                 item = item,
                                 downloadRepository = downloadRepository,
-                                coroutineScope = coroutineScope
+                                coroutineScope = coroutineScope,
+                                isSelectionModeActive = isSelectionModeActive,
+                                isSelected = isSelected,
+                                onSelectionToggled = {
+                                    val current = selectedItemIds.value.toMutableSet()
+                                    if (current.contains(item.id)) {
+                                        current.remove(item.id)
+                                    } else {
+                                        current.add(item.id)
+                                    }
+                                    selectedItemIds.value = current
+                                    if (current.isEmpty()) {
+                                        isSelectionModeActive = false
+                                    }
+                                },
+                                onLongPressActive = {
+                                    isSelectionModeActive = true
+                                    selectedItemIds.value = setOf(item.id)
+                                }
                             )
                         }
                     }
                 }
             }
+        }
+
+        // Unified Bulk Choices Dialog matching user specifications
+        if (showBulkDeleteConfirmation) {
+            AlertDialog(
+                onDismissRequest = { showBulkDeleteConfirmation = false },
+                title = { Text("Delete Selected Downloads?", fontWeight = FontWeight.Bold) },
+                text = {
+                    Column {
+                        Text(
+                            text = "Choose how you want to delete the ${selectedItemIds.value.size} selected items:",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        // Option 1: Remove from List Only
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                            onClick = {
+                                showBulkDeleteConfirmation = false
+                                coroutineScope.launch {
+                                    val selectedItems = filteredDownloads.filter { it.id in selectedItemIds.value }
+                                    selectedItems.forEach { item ->
+                                        if (item.status == "DOWNLOADING") {
+                                            DownloadEngine.pauseDownload(item.id)
+                                        }
+                                        downloadRepository.deleteDownload(item)
+                                    }
+                                    Toast.makeText(context, "Removed ${selectedItems.size} downloads", Toast.LENGTH_SHORT).show()
+                                    isSelectionModeActive = false
+                                    selectedItemIds.value = emptySet()
+                                }
+                            }
+                        ) {
+                            Text("Delete from List Only", color = MaterialTheme.colorScheme.onSecondaryContainer, fontWeight = FontWeight.SemiBold)
+                        }
+                        
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        // Option 2: Permanently Delete (Files + List)
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE50914)),
+                            onClick = {
+                                showBulkDeleteConfirmation = false
+                                val isGranted = ContextCompat.checkSelfPermission(context, bulkPermissionToCheck) == PackageManager.PERMISSION_GRANTED
+                                val prefs = context.getSharedPreferences("download_prefs", Context.MODE_PRIVATE)
+                                val hasRequestedBefore = prefs.getBoolean("storage_permission_requested", false)
+                                
+                                if (isGranted || hasRequestedBefore) {
+                                    coroutineScope.launch(Dispatchers.IO) {
+                                        val selectedItems = filteredDownloads.filter { it.id in selectedItemIds.value }
+                                        selectedItems.forEach { item ->
+                                            performPermanentDeleteAction(context, item, downloadRepository)
+                                        }
+                                        launch(Dispatchers.Main) {
+                                            Toast.makeText(context, "Permanently deleted ${selectedItems.size} files", Toast.LENGTH_SHORT).show()
+                                            isSelectionModeActive = false
+                                            selectedItemIds.value = emptySet()
+                                        }
+                                    }
+                                } else {
+                                    prefs.edit().putBoolean("storage_permission_requested", true).apply()
+                                    bulkStoragePermissionLauncher.launch(bulkPermissionToCheck)
+                                }
+                            }
+                        ) {
+                            Text("Permanently Delete", color = Color.White, fontWeight = FontWeight.SemiBold)
+                        }
+                        
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        // Option 3: Cancel
+                        TextButton(
+                            modifier = Modifier.align(Alignment.End),
+                            onClick = { showBulkDeleteConfirmation = false }
+                        ) {
+                            Text("Cancel")
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {}
+            )
         }
 
         // Sub Settings Overlays
@@ -1875,7 +2082,7 @@ fun DownloadManagerDialog(
                                 color = MaterialTheme.colorScheme.primary
                             )
                             Text(
-                                text = "Version: 2.5.5 - Pro Stable Build",
+                                text = "Version: " + com.example.AppVersionInfo.getVersionName(androidx.compose.ui.platform.LocalContext.current) + " - Pro Stable Build",
                                 fontSize = 13.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(top = 4.dp)
@@ -2022,27 +2229,94 @@ fun DownloadManagerDialog(
 }
 
 // 1DM style individual download list item (Screenshot 2 Details)
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun DownloadItemRow(
     item: DownloadItem,
     downloadRepository: DownloadRepository,
-    coroutineScope: CoroutineScope
+    coroutineScope: CoroutineScope,
+    isSelectionModeActive: Boolean,
+    isSelected: Boolean,
+    onSelectionToggled: () -> Unit,
+    onLongPressActive: () -> Unit
 ) {
     val context = LocalContext.current
     val df = remember { DecimalFormat("#.##") }
+    val ableDramaColor = Color(0xFFD0BCFF)
     
     val animatedProgress by animateFloatAsState(
         targetValue = item.progress / 100f,
         label = "smoothProgress"
     )
+
+    var showContextMenu by remember { mutableStateOf(false) }
+    var pendingPermanentDeleteAction by remember { mutableStateOf(false) }
+    val isDarkTheme = MaterialTheme.colorScheme.background.red < 0.5f
+
+    val permissionToCheck = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        android.Manifest.permission.READ_MEDIA_VIDEO
+    } else {
+        android.Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+
+    val storagePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            if (pendingPermanentDeleteAction) {
+                pendingPermanentDeleteAction = false
+                coroutineScope.launch {
+                    performPermanentDeleteAction(context, item, downloadRepository)
+                }
+            }
+        } else {
+            pendingPermanentDeleteAction = false
+            Toast.makeText(context, "Storage permission is required to permanently remove downloaded files.", Toast.LENGTH_LONG).show()
+        }
+    }
     
+    val rowInteractionSource = remember { MutableInteractionSource() }
+    val isRowFocused by rowInteractionSource.collectIsFocusedAsState()
+    val focusedScale by animateFloatAsState(targetValue = if (isRowFocused) 1.03f else 1f, label = "rowScale")
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .scale(focusedScale)
+            .focusable(interactionSource = rowInteractionSource)
+            .combinedClickable(
+                interactionSource = rowInteractionSource,
+                indication = androidx.compose.foundation.LocalIndication.current,
+                onClick = {
+                    if (isSelectionModeActive) {
+                        onSelectionToggled()
+                    } else {
+                        showContextMenu = true
+                    }
+                },
+                onLongClick = {
+                    if (isSelectionModeActive) {
+                        onSelectionToggled()
+                    } else {
+                        onLongPressActive()
+                    }
+                }
+            )
             .testTag("download_item_${item.id}"),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) {
+                ableDramaColor.copy(alpha = 0.12f)
+            } else if (isRowFocused) {
+                MaterialTheme.colorScheme.surfaceVariant
+            } else {
+                MaterialTheme.colorScheme.surface
+            }
+        ),
+        border = BorderStroke(
+            width = if (isSelected || isRowFocused) 2.5.dp else 1.dp,
+            color = if (isSelected || isRowFocused) ableDramaColor else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+        )
     ) {
         Row(
             modifier = Modifier
@@ -2050,6 +2324,32 @@ fun DownloadItemRow(
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (isSelectionModeActive) {
+                Box(
+                    modifier = Modifier
+                        .padding(end = 8.dp)
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .background(if (isSelected) ableDramaColor else Color.Transparent)
+                        .clickable { onSelectionToggled() }
+                        .border(
+                            width = 1.5.dp,
+                            color = if (isSelected) ableDramaColor else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                            shape = CircleShape
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isSelected) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Selected",
+                            tint = Color.Black,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+            }
+
             // Left Reel Icon
             Box(
                 modifier = Modifier
@@ -2196,24 +2496,8 @@ fun DownloadItemRow(
 
                 IconButton(
                     onClick = {
-                        coroutineScope.launch {
-                            if (item.status == "DOWNLOADING") {
-                                DownloadEngine.pauseDownload(item.id)
-                            }
-                            
-                            // Delete physical file too
-                            try {
-                                val file = File(item.filePath)
-                                if (file.exists()) {
-                                    file.delete()
-                                }
-                            } catch (e: Exception) {
-                                e.printStackTrace()
-                            }
-                            
-                            downloadRepository.deleteDownload(item)
-                            Toast.makeText(context, "Removed from list", Toast.LENGTH_SHORT).show()
-                        }
+                        // Show same context menu options dialog (Delete / Permanently Delete / Cancel) as long pressed per user requirements
+                        showContextMenu = true
                     }
                 ) {
                     Icon(
@@ -2226,4 +2510,114 @@ fun DownloadItemRow(
             }
         }
     }
+
+    // Single unified clean 3-option AlertDialog for individual delete directly triggered per user requirements
+    if (showContextMenu) {
+        AlertDialog(
+            onDismissRequest = { showContextMenu = false },
+            title = { Text("Delete Download?", fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        text = "Choose how you want to delete this downloaded file:",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    // Option 1: Remove from List Only
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                        onClick = {
+                            showContextMenu = false
+                            coroutineScope.launch {
+                                if (item.status == "DOWNLOADING") {
+                                    DownloadEngine.pauseDownload(item.id)
+                                }
+                                downloadRepository.deleteDownload(item)
+                                Toast.makeText(context, "Removed from list", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    ) {
+                        Text("Delete from List Only", color = MaterialTheme.colorScheme.onSecondaryContainer, fontWeight = FontWeight.SemiBold)
+                    }
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    // Option 2: Permanently Delete (Files + List)
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE50914)),
+                        onClick = {
+                            showContextMenu = false
+                            val isGranted = ContextCompat.checkSelfPermission(context, permissionToCheck) == PackageManager.PERMISSION_GRANTED
+                            val sharedPrefs = context.getSharedPreferences("download_prefs", android.content.Context.MODE_PRIVATE)
+                            val hasRequestedBefore = sharedPrefs.getBoolean("storage_permission_requested", false)
+                            
+                            if (isGranted || hasRequestedBefore) {
+                                coroutineScope.launch {
+                                    performPermanentDeleteAction(context, item, downloadRepository)
+                                }
+                            } else {
+                                pendingPermanentDeleteAction = true
+                                sharedPrefs.edit().putBoolean("storage_permission_requested", true).apply()
+                                storagePermissionLauncher.launch(permissionToCheck)
+                            }
+                        }
+                    ) {
+                        Text("Permanently Delete", color = Color.White, fontWeight = FontWeight.SemiBold)
+                    }
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    // Option 3: Cancel
+                    TextButton(
+                        modifier = Modifier.align(Alignment.End),
+                        onClick = { showContextMenu = false }
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {}
+        )
+    }
 }
+
+// Suspending helper function to perform physical and DB deletion
+private suspend fun performPermanentDeleteAction(
+    context: android.content.Context,
+    item: DownloadItem,
+    downloadRepository: DownloadRepository
+) {
+    if (item.status == "DOWNLOADING") {
+        DownloadEngine.pauseDownload(item.id)
+    }
+    
+    // 1. Delete physical resource from storage
+    try {
+        val file = java.io.File(item.filePath)
+        if (file.exists()) {
+            val deleted = file.delete()
+            if (!deleted) {
+                // Graceful fallback to MediaStore resolver delete if stored through indices
+                context.contentResolver.delete(
+                    android.provider.MediaStore.Files.getContentUri("external"),
+                    "_data=?",
+                    arrayOf(file.absolutePath)
+                )
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    
+    // 2. Delete database entry from both lists/queues
+    downloadRepository.deleteDownload(item)
+    
+    // Show user responsive feedback
+    android.widget.Toast.makeText(context, "Storage and records cleared permanently", android.widget.Toast.LENGTH_SHORT).show()
+}
+

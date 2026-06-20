@@ -11,6 +11,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.runtime.rememberCoroutineScope
 import android.content.Context
 import android.content.Intent
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.DisposableEffect
 import com.example.data.AppDatabase
 import com.example.data.DownloadRepository
 import com.example.ui.components.DownloadManagerDialog
@@ -30,7 +35,21 @@ class DownloadManagerActivity : ComponentActivity() {
 
         setContent {
             val prefs = getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE)
-            val isDarkTheme = prefs.getBoolean("is_dark_theme", true)
+            var isDarkTheme by remember {
+                mutableStateOf(prefs.getBoolean("is_dark_theme", true))
+            }
+
+            DisposableEffect(prefs) {
+                val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
+                    if (key == "is_dark_theme") {
+                        isDarkTheme = p.getBoolean("is_dark_theme", true)
+                    }
+                }
+                prefs.registerOnSharedPreferenceChangeListener(listener)
+                onDispose {
+                    prefs.unregisterOnSharedPreferenceChangeListener(listener)
+                }
+            }
 
             MyApplicationTheme(darkTheme = isDarkTheme) {
                 Surface(

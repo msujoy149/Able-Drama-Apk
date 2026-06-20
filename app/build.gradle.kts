@@ -13,7 +13,7 @@ android {
   defaultConfig {
     applicationId = "com.aistudio.abledrama.qptvmn"
     minSdk = 24
-    targetSdk = 35
+    targetSdk = 34
     versionCode = 2
     versionName = "2.0.1"
 
@@ -90,6 +90,7 @@ dependencies {
   // implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
+  implementation(libs.androidx.work.runtime)
   implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)

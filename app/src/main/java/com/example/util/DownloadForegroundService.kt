@@ -7,6 +7,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.net.wifi.WifiManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
@@ -21,6 +22,7 @@ class DownloadForegroundService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var updateJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     companion object {
         const val NOTIFICATION_ID = 2026
@@ -29,6 +31,7 @@ class DownloadForegroundService : Service() {
         const val ACTION_START = "com.example.ACTION_START"
         const val ACTION_PAUSE = "com.example.ACTION_PAUSE"
         const val ACTION_RESUME = "com.example.ACTION_RESUME"
+        const val ACTION_CANCEL = "com.example.ACTION_CANCEL"
         const val EXTRA_ITEM_ID = "EXTRA_ITEM_ID"
 
         fun showCompletedNotification(context: Context, item: DownloadItem) {
@@ -172,6 +175,16 @@ class DownloadForegroundService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to acquire WakeLock", e)
         }
+
+        // Acquire WifiLock to keep WiFi active during lockscreen status
+        try {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            wifiLock = wifiManager?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "AbleDrama:WifiLock")
+            wifiLock?.acquire()
+            Log.d(TAG, "WifiLock acquired safely")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to acquire WifiLock", e)
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -195,6 +208,11 @@ class DownloadForegroundService : Service() {
             ACTION_RESUME -> {
                 if (itemId != -1L) {
                     DownloadEngine.startDownload(this, itemId)
+                }
+            }
+            ACTION_CANCEL -> {
+                if (itemId != -1L) {
+                    DownloadEngine.cancelDownload(itemId)
                 }
             }
         }
@@ -341,7 +359,7 @@ class DownloadForegroundService : Service() {
             .setAutoCancel(false)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
 
-        // Add pause support
+        // Add pause/resume action button
         if (isDownloading && itemId != -1L) {
             val pauseIntent = Intent(this, DownloadForegroundService::class.java).apply {
                 action = ACTION_PAUSE
@@ -377,6 +395,25 @@ class DownloadForegroundService : Service() {
             )
         }
 
+        // Add cancel support
+        if (itemId != -1L) {
+            val cancelIntent = Intent(this, DownloadForegroundService::class.java).apply {
+                action = ACTION_CANCEL
+                putExtra(EXTRA_ITEM_ID, itemId)
+            }
+            val cancelPendingIntent = PendingIntent.getService(
+                this,
+                itemId.toInt() + 7000,
+                cancelIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "Cancel",
+                cancelPendingIntent
+            )
+        }
+
         return builder.build()
     }
 
@@ -406,6 +443,14 @@ class DownloadForegroundService : Service() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Exception during WakeLock release", e)
+        }
+        try {
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
+                Log.d(TAG, "WifiLock released safely")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception during WifiLock release", e)
         }
         updateJob?.cancel()
         serviceScope.cancel()

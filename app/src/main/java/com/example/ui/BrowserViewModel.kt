@@ -228,11 +228,6 @@ class BrowserViewModel(
     private val _detectedResources = MutableStateFlow<Map<String, List<DetectedResource>>>(emptyMap())
     val detectedResources: StateFlow<Map<String, List<DetectedResource>>> = _detectedResources.asStateFlow()
 
-    val currentDetectedResources: StateFlow<List<DetectedResource>> = combine(_detectedResources, selectedTabId) { map, activeId ->
-        val list = map[activeId] ?: emptyList()
-        list.filter { isValidVideoResource(it.url, it.title) }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
     // Tracks if a video is actively playing on each tab
     private val _isVideoPlayingMap = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     val isVideoPlaying: StateFlow<Boolean> = combine(_isVideoPlayingMap, selectedTabId) { map, activeId ->
@@ -246,6 +241,76 @@ class BrowserViewModel(
     // Tracks the active video duration for each tab
     private val _activeVideoDurationMap = MutableStateFlow<Map<String, Double>>(emptyMap())
     val activeVideoDurationMap: StateFlow<Map<String, Double>> = _activeVideoDurationMap.asStateFlow()
+
+    val currentDetectedResources: StateFlow<List<DetectedResource>> = combine(
+        _detectedResources,
+        selectedTabId,
+        _isVideoPlayingMap,
+        _activeVideoTitleMap
+    ) { map, activeId, isPlayingMap, titleMap ->
+        val isPlaying = isPlayingMap[activeId] ?: false
+        val activeTitle = titleMap[activeId] ?: ""
+        
+        val list = map[activeId] ?: emptyList()
+        val videoResources = list.filter { it.fileType == "Video" && isValidVideoResource(it.url, it.title) }
+        
+        val activeTab = _browserTabs.value.find { it.id == activeId } ?: _dramaTabs.value.find { it.id == activeId }
+        val pageUrl = activeTab?.url ?: currentUrl.value
+        
+        if (pageUrl.isBlank() || pageUrl.startsWith("browser://") || pageUrl == "about:blank" || !isDownloadablePage(pageUrl)) {
+            return@combine emptyList<DetectedResource>()
+        }
+        
+        val currentTitleFallback = when {
+            activeTitle.isNotBlank() && !isGenericTitle(activeTitle) -> activeTitle
+            !activeTab?.title.isNullOrBlank() -> {
+                activeTab.title
+                    .replace(" - YouTube", "", ignoreCase = true)
+                    .replace(" | Facebook", "", ignoreCase = true)
+                    .replace(" - TikTok", "", ignoreCase = true)
+                    .replace(" - Instagram", "", ignoreCase = true)
+                    .replace(" - bilibili", "", ignoreCase = true)
+                    .replace(" - BiliBili", "", ignoreCase = true)
+                    .trim()
+            }
+            else -> "Playable Video Stream"
+        }
+        
+        if (!isPlaying && videoResources.isEmpty()) {
+            emptyList()
+        } else {
+            // Generate fallback resources if video is playing but no resources detected yet
+            val baseResources = if (videoResources.isEmpty() && isPlaying) {
+                listOf(
+                    DetectedResource(
+                        url = pageUrl,
+                        title = currentTitleFallback,
+                        fileType = "Video",
+                        quality = "720p",
+                        fileSize = 0L
+                    )
+                )
+            } else {
+                videoResources
+            }
+            
+            baseResources.map { res ->
+                val targetTitle = when {
+                    !isGenericTitle(res.title) -> res.title
+                    !isGenericTitle(currentTitleFallback) -> currentTitleFallback
+                    else -> "Playable Video"
+                }.replace(" - YouTube", "", ignoreCase = true)
+                 .replace(" | Facebook", "", ignoreCase = true)
+                 .replace(" - TikTok", "", ignoreCase = true)
+                 .replace(" - Instagram", "", ignoreCase = true)
+                 .replace(" - bilibili", "", ignoreCase = true)
+                 .replace(" - BiliBili", "", ignoreCase = true)
+                 .trim()
+                
+                res.copy(title = targetTitle)
+            }.distinctBy { it.url }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     fun isGenericTitle(title: String): Boolean {
         val t = title.lowercase().trim()
@@ -344,7 +409,7 @@ class BrowserViewModel(
 
     fun isDownloadablePage(url: String): Boolean {
         val cleanUrl = url.lowercase().trim()
-        if (cleanUrl.isBlank()) return false
+        if (cleanUrl.isBlank() || cleanUrl.startsWith("browser://") || cleanUrl == "about:blank") return false
         
         val uri = try { android.net.Uri.parse(cleanUrl) } catch(e: Exception) { null }
         val host = uri?.host ?: ""
@@ -412,7 +477,15 @@ class BrowserViewModel(
         }
     }
 
-    fun onVideoPlaybackStateChanged(tabId: String, isPlaying: Boolean, activeTitle: String, activeSrc: String, duration: Double = 0.0) {
+    fun onVideoPlaybackStateChanged(
+        tabId: String, 
+        isPlaying: Boolean, 
+        activeTitle: String, 
+        activeSrc: String, 
+        duration: Double = 0.0,
+        videoWidth: Int = 0,
+        videoHeight: Int = 0
+    ) {
         _isVideoPlayingMap.update { map ->
             map.toMutableMap().apply {
                 put(tabId, isPlaying)
@@ -425,60 +498,104 @@ class BrowserViewModel(
                 }
             }
         }
-        if (activeTitle.isNotBlank()) {
-            _activeVideoTitleMap.update { map ->
-                map.toMutableMap().apply {
-                    put(tabId, activeTitle)
-                }
-            }
-            // Update any existing detected resources with a generic title on this tab
-            _detectedResources.update { map ->
-                val list = map[tabId] ?: emptyList()
-                val updatedList = list.map { res ->
-                    if (isGenericTitle(res.title)) {
-                        res.copy(title = activeTitle)
-                    } else {
-                        res
-                    }
-                }
-                map.toMutableMap().apply {
-                    put(tabId, updatedList)
-                }
-            }
-        }
 
         val activeTab = _browserTabs.value.find { it.id == tabId } ?: _dramaTabs.value.find { it.id == tabId }
         val pageUrl = activeTab?.url ?: currentUrl.value
         val isDownloadable = isDownloadablePage(pageUrl)
 
+        val resolvedTitle = when {
+            activeTitle.isNotBlank() && !isGenericTitle(activeTitle) -> activeTitle
+            !activeTab?.title.isNullOrBlank() -> {
+                activeTab.title
+                    .replace(" - YouTube", "", ignoreCase = true)
+                    .replace(" | Facebook", "", ignoreCase = true)
+                    .replace(" - TikTok", "", ignoreCase = true)
+                    .replace(" - Instagram", "", ignoreCase = true)
+                    .replace(" - bilibili", "", ignoreCase = true)
+                    .replace(" - BiliBili", "", ignoreCase = true)
+                    .trim()
+            }
+            else -> "Playable Video Stream"
+        }
+
+        _activeVideoTitleMap.update { map ->
+            map.toMutableMap().apply {
+                put(tabId, resolvedTitle)
+            }
+        }
+
+        // Update any existing detected resources on this tab
+        _detectedResources.update { map ->
+            val list = map[tabId] ?: emptyList()
+            val updatedList = list.map { res ->
+                if (isGenericTitle(res.title) && !isGenericTitle(resolvedTitle)) {
+                    res.copy(title = resolvedTitle)
+                } else {
+                    res
+                }
+            }
+            map.toMutableMap().apply {
+                put(tabId, updatedList)
+            }
+        }
+
+        val mappedQuality = when {
+            videoWidth >= 3840 || videoHeight >= 2160 -> "2160p"
+            videoWidth >= 2560 || videoHeight >= 1440 -> "1440p"
+            videoWidth >= 1920 || videoHeight >= 1080 -> "1080p"
+            videoWidth >= 1280 || videoHeight >= 720 -> "720p"
+            videoWidth >= 854 || videoHeight >= 480 -> "480p"
+            videoWidth >= 640 || videoHeight >= 360 -> "360p"
+            videoWidth >= 426 || videoHeight >= 240 -> "240p"
+            videoHeight > 0 -> "${videoHeight}p"
+            else -> null
+        }
+
         if (isPlaying && isDownloadable) {
             // If activeSrc is blank or uses MSE blobs, synthesize high quality fallback stream using the page URL
             val deservesFallback = activeSrc.isBlank() || activeSrc.startsWith("blob:") || !activeSrc.startsWith("http")
             val targetMediaUrl = if (deservesFallback) pageUrl else activeSrc
-            val resolvedTitle = if (activeTitle.isNotBlank()) activeTitle else (activeTab?.title?.replace(" - YouTube", "")?.replace(" | Facebook", "")?.replace(" - TikTok", "") ?: "Playable Video Stream")
 
             val playRes = DetectedResource(
                 url = targetMediaUrl,
-                title = if (resolvedTitle.isNotBlank()) resolvedTitle else "Video Media Stream",
+                title = resolvedTitle,
                 fileType = "Video",
-                quality = if (targetMediaUrl.contains(".m3u8")) "HLS Playlist" else "720p",
+                quality = mappedQuality ?: (if (targetMediaUrl.contains(".m3u8")) "HLS Playlist" else "720p"),
                 fileSize = 0L
             )
             addDetectedResource(tabId, playRes)
         } else if (activeSrc.isNotBlank() && activeSrc.startsWith("http")) {
             val playRes = DetectedResource(
                 url = activeSrc,
-                title = if (activeTitle.isNotBlank()) activeTitle else "Video Playback Name",
+                title = resolvedTitle,
                 fileType = "Video",
-                quality = if (activeSrc.contains(".m3u8")) "HLS Playlist" else "720p",
+                quality = mappedQuality ?: (if (activeSrc.contains(".m3u8")) "HLS Playlist" else "720p"),
                 fileSize = 0L
             )
             addDetectedResource(tabId, playRes)
         }
     }
 
+    fun isValidAudioResource(url: String, title: String): Boolean {
+        val urlLower = url.lowercase()
+        val blacklistKeywords = listOf(
+            "analytics", "telemetry", "metrics", "collect", "tracker", "logging", "logger", 
+            "google-analytics", "doubleclick", "googlesyndication", "/ad", "popads", "popcash", 
+            "manifest.json", "manifest.mpd", "hotkeys", "caption", "subtitles", "playlog", "ping", 
+            "/v1/logs", "youtubei/v1", "/log_event", "pagead", "favicon.ico"
+        )
+        if (blacklistKeywords.any { urlLower.contains(it) }) return false
+        val audioExtensions = listOf(".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac", ".wma", ".opus", ".mka", ".m3u", ".m3u8_audio")
+        return audioExtensions.any { urlLower.substringBefore("?").endsWith(it) } || urlLower.contains("audioplayback") || urlLower.contains("audio_stream")
+    }
+
     fun addDetectedResource(tabId: String, resource: DetectedResource) {
-        if (!isValidVideoResource(resource.url, resource.title)) {
+        val isValid = if (resource.fileType == "Audio") {
+            isValidAudioResource(resource.url, resource.title)
+        } else {
+            isValidVideoResource(resource.url, resource.title)
+        }
+        if (!isValid) {
             return
         }
 
@@ -850,6 +967,9 @@ class BrowserViewModel(
 
         val formattedUrl = formatUrl(url)
         val activeId = if (_isDramaModeActive.value) _dramaSelectedTabId.value else _browserSelectedTabId.value
+        if (formattedUrl.startsWith("browser://", ignoreCase = true) || formattedUrl.isBlank() || formattedUrl == "about:blank") {
+            clearDetectedResources(activeId)
+        }
         val activeList = getActiveList()
         activeList.value = activeList.value.map { tab ->
             if (tab.id == activeId) {
@@ -1038,7 +1158,7 @@ class BrowserViewModel(
             return
         }
         searchJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            kotlinx.coroutines.delay(250)
+            kotlinx.coroutines.delay(80)
             val suggestions = generateSuggestions(query)
             _searchSuggestions.value = suggestions
         }
@@ -1047,16 +1167,56 @@ class BrowserViewModel(
     fun loadRecentHistorySuggestions() {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                val list = repository.searchHistory.first()
-                val mapped = list.map {
-                    SearchSuggestionItem(
-                        id = it.id,
-                        text = it.query,
-                        subText = "Recent search",
-                        type = SuggestionType.HISTORY_SEARCH
+                val finalSuggestions = mutableListOf<SearchSuggestionItem>()
+                val seenTexts = mutableSetOf<String>()
+
+                fun addSuggestion(item: SearchSuggestionItem) {
+                    val key = item.text.trim().lowercase()
+                    if (key.isNotEmpty() && !seenTexts.contains(key)) {
+                        seenTexts.add(key)
+                        finalSuggestions.add(item)
+                    }
+                }
+
+                // 1. Mapped history search (recent 7)
+                try {
+                    val list = repository.searchHistory.first()
+                    list.take(7).forEach {
+                        addSuggestion(
+                            SearchSuggestionItem(
+                                id = it.id,
+                                text = it.query,
+                                subText = "Recent search",
+                                type = SuggestionType.HISTORY_SEARCH
+                            )
+                        )
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+
+                // 2. Mapped popular websites (8 default sites)
+                val popularPresets = listOf(
+                    Pair("google.com", "Google - Search Engine"),
+                    Pair("youtube.com", "YouTube - Videos & Music"),
+                    Pair("facebook.com", "Facebook - Social Media"),
+                    Pair("wikipedia.org", "Wikipedia - Free Encyclopedia"),
+                    Pair("github.com", "GitHub - Developer Platform"),
+                    Pair("chatgpt.com", "ChatGPT - AI Assistant"),
+                    Pair("toffeelive.com", "Toffee - Live TV & Sports"),
+                    Pair("chorki.com", "Chorki - Bengali Drama, Movie, Series")
+                )
+                popularPresets.forEach { (url, title) ->
+                    addSuggestion(
+                        SearchSuggestionItem(
+                            text = url,
+                            subText = title,
+                            type = SuggestionType.BROWSER_HISTORY
+                        )
                     )
                 }
-                _searchSuggestions.value = mapped
+
+                _searchSuggestions.value = finalSuggestions.take(15)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -1119,75 +1279,60 @@ class BrowserViewModel(
 
     private suspend fun generateSuggestions(query: String): List<SearchSuggestionItem> {
         if (query.trim().isBlank()) return emptyList()
-        val trimmed = query.trim().lowercase()
+        val trimmed = query.trim()
+        val trimmedLower = trimmed.lowercase()
 
-        // 1. Get previous searches from local DB matching query
-        val localMatches = mutableListOf<SearchSuggestionItem>()
+        val finalSuggestions = mutableListOf<SearchSuggestionItem>()
+        val seenTexts = mutableSetOf<String>()
+
+        fun addSuggestion(item: SearchSuggestionItem) {
+            val key = item.text.trim().lowercase()
+            if (key.isNotEmpty() && !seenTexts.contains(key)) {
+                seenTexts.add(key)
+                finalSuggestions.add(item)
+            }
+        }
+
+        // 1. Direct typed search query suggestion
+        addSuggestion(
+            SearchSuggestionItem(
+                text = trimmed,
+                subText = "Search Google for \"$trimmed\"",
+                type = SuggestionType.RELATED_SUGGEST
+            )
+        )
+
+        // 2. Matching search history in database
         try {
             val searchHistorySnapshot = repository.searchHistory.first()
             val matchingHistory = searchHistorySnapshot.filter { 
-                it.query.lowercase().contains(trimmed) 
+                it.query.lowercase().contains(trimmedLower) 
             }.sortedWith(compareByDescending<com.example.data.SearchQueryHistory> { it.useCount }
                 .thenByDescending { it.timestamp })
             
-            matchingHistory.forEach {
-                localMatches.add(
+            matchingHistory.take(5).forEach {
+                addSuggestion(
                     SearchSuggestionItem(
                         id = it.id,
                         text = it.query,
-                        subText = "Previous search",
+                        subText = "History search",
                         type = SuggestionType.HISTORY_SEARCH
                     )
                 )
             }
         } catch (e: Exception) {
-            android.util.Log.e("BrowserViewModel", "Error fetching matching local search queries", e)
+            android.util.Log.e("BrowserViewModel", "Error matching local searches", e)
         }
 
-        // 2. Clear exact duplicates from following sections
-        val localTexts = localMatches.map { it.text.lowercase() }.toSet()
-
-        // 3. Related searches from Google Suggestion API
-        val relatedMatches = mutableListOf<SearchSuggestionItem>()
-        try {
-            val urlString = "https://suggestqueries.google.com/complete/search?client=chrome&q=" + java.net.URLEncoder.encode(trimmed, "UTF-8")
-            val url = java.net.URL(urlString)
-            val conn = url.openConnection() as java.net.HttpURLConnection
-            conn.requestMethod = "GET"
-            conn.connectTimeout = 1500
-            conn.readTimeout = 1500
-            
-            val response = conn.inputStream.bufferedReader().use { it.readText() }
-            val jsonArray = org.json.JSONArray(response)
-            if (jsonArray.length() > 1) {
-                val suggestionsArray = jsonArray.getJSONArray(1)
-                for (i in 0 until suggestionsArray.length()) {
-                    val s = suggestionsArray.getString(i)
-                    if (s.lowercase() != trimmed && !localTexts.contains(s.lowercase())) {
-                        relatedMatches.add(
-                            SearchSuggestionItem(
-                                text = s,
-                                subText = "Search suggestion",
-                                type = SuggestionType.RELATED_SUGGEST
-                            )
-                        )
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("BrowserViewModel", "Error fetching google suggestions", e)
-        }
-
-        // 4. Matching URLs from browser history
-        val urlMatches = mutableListOf<SearchSuggestionItem>()
+        // 3. Matching local browser history Items
         try {
             val browserHistorySnapshot = repository.browserHistory.first()
             val matchingUrls = browserHistorySnapshot.filter {
-                it.url.lowercase().contains(trimmed) || it.title.lowercase().contains(trimmed)
+                it.url.lowercase().contains(trimmedLower) || it.title.lowercase().contains(trimmedLower)
             }.distinctBy { it.url }
 
-            matchingUrls.forEach {
-                urlMatches.add(
+            matchingUrls.take(5).forEach {
+                addSuggestion(
                     SearchSuggestionItem(
                         text = it.url,
                         subText = it.title,
@@ -1196,22 +1341,140 @@ class BrowserViewModel(
                 )
             }
         } catch (e: Exception) {
-            android.util.Log.e("BrowserViewModel", "Error fetching matching history items", e)
+            android.util.Log.e("BrowserViewModel", "Error matching local browser history", e)
         }
 
-        // Let's rank them intelligently
-        val finalSuggestions = mutableListOf<SearchSuggestionItem>()
-        
-        // Exact matching previous searches first
-        finalSuggestions.addAll(localMatches.take(5))
-        
-        // Then related searches
-        finalSuggestions.addAll(relatedMatches.take(5))
-        
-        // Then matching web urls in browser history
-        finalSuggestions.addAll(urlMatches.take(5))
+        // 4. Highlighted popular preset websites matching query (Frequently Visited Websites)
+        val popularPresets = listOf(
+            Pair("google.com", "Google - Search Engine"),
+            Pair("youtube.com", "YouTube - Videos & Music"),
+            Pair("facebook.com", "Facebook - Social Media"),
+            Pair("wikipedia.org", "Wikipedia - Free Encyclopedia"),
+            Pair("github.com", "GitHub - Developer Platform"),
+            Pair("chatgpt.com", "ChatGPT - AI Assistant"),
+            Pair("gmail.com", "Gmail - Google Mail"),
+            Pair("toffeelive.com", "Toffee - Live TV & Sports"),
+            Pair("chorki.com", "Chorki - Bengali Drama, Movie, Series"),
+            Pair("cricbuzz.com", "Cricbuzz - Live Cricket Scores"),
+            Pair("bioscopelive.com", "Bioscope - Live TV & Natok"),
+            Pair("prothomalo.com", "Prothom Alo - Bengali News"),
+            Pair("yahoo.com", "Yahoo! Search"),
+            Pair("netflix.com", "Netflix - Movies & TV Shows"),
+            Pair("instagram.com", "Instagram - Social Net"),
+            Pair("twitter.com", "Twitter / X")
+        )
 
-        return finalSuggestions
+        popularPresets.filter {
+            it.first.lowercase().contains(trimmedLower) || it.second.lowercase().contains(trimmedLower)
+        }.take(5).forEach { (url, title) ->
+            addSuggestion(
+                SearchSuggestionItem(
+                    text = url,
+                    subText = title,
+                    type = SuggestionType.BROWSER_HISTORY
+                )
+            )
+        }
+
+        // 5. Connect and fetch Google Auto-Suggest matches live
+        try {
+            val urlString = "https://suggestqueries.google.com/complete/search?client=chrome&q=" + java.net.URLEncoder.encode(trimmed, "UTF-8")
+            val url = java.net.URL(urlString)
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 800
+            conn.readTimeout = 800
+            
+            val response = conn.inputStream.bufferedReader().use { it.readText() }
+            val jsonArray = org.json.JSONArray(response)
+            if (jsonArray.length() > 1) {
+                val suggestionsArray = jsonArray.getJSONArray(1)
+                for (i in 0 until suggestionsArray.length()) {
+                    val s = suggestionsArray.getString(i)
+                    addSuggestion(
+                        SearchSuggestionItem(
+                            text = s,
+                            subText = "Search suggestion",
+                            type = SuggestionType.RELATED_SUGGEST
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("BrowserViewModel", "Error fetching live suggestions", e)
+        }
+
+        // 6. Local curated Trending list matcher
+        val trendingPresets = listOf(
+            "Cricket Live Score",
+            "Bangladesh Weather Today",
+            "Latest Bangla Natok",
+            "Best AI Tools",
+            "Chorki Web Series",
+            "Toffee Drama",
+            "AI Video Generator",
+            "Free AI Chatbot",
+            "Bioscope Drama Live",
+            "Today News Bangladesh",
+            "YouTube Music",
+            "Google Translate",
+            "Facebook Login",
+            "Cricbuzz Scorecard",
+            "Chat GPT Online"
+        )
+
+        trendingPresets.filter {
+            it.lowercase().contains(trimmedLower)
+        }.take(5).forEach { topic ->
+            addSuggestion(
+                SearchSuggestionItem(
+                    text = topic,
+                    subText = "Trending topic",
+                    type = SuggestionType.RELATED_SUGGEST
+                )
+            )
+        }
+
+        // Mix back-up trending topics if user's list size is still less than 12
+        if (finalSuggestions.size < 12) {
+            trendingPresets.take(15 - finalSuggestions.size).forEach { topic ->
+                addSuggestion(
+                    SearchSuggestionItem(
+                        text = topic,
+                        subText = "Trending search",
+                        type = SuggestionType.RELATED_SUGGEST
+                    )
+                )
+            }
+        }
+
+        return finalSuggestions.take(15)
+    }
+
+    fun getCleanActiveVideoTitle(tabId: String): String {
+        var title = _activeVideoTitleMap.value[tabId] ?: ""
+        
+        if (title.isBlank() || isGenericTitle(title)) {
+            val activeTab = _browserTabs.value.find { it.id == tabId } ?: _dramaTabs.value.find { it.id == tabId }
+            title = activeTab?.title ?: ""
+        }
+        
+        if (title.isBlank() || isGenericTitle(title)) {
+            title = "Video Playback"
+        }
+        
+        return title
+            .replace(" - YouTube", "", ignoreCase = true)
+            .replace(" | Facebook", "", ignoreCase = true)
+            .replace(" - TikTok", "", ignoreCase = true)
+            .replace(" - Instagram", "", ignoreCase = true)
+            .replace(" - Watch", "", ignoreCase = true)
+            .replace(" | Twitter", "", ignoreCase = true)
+            .replace(" on X", "", ignoreCase = true)
+            .replace("[Facebook]", "", ignoreCase = true)
+            .replace("Video Element", "Video", ignoreCase = true)
+            .replace("ytd-watch-metadata", "", ignoreCase = true)
+            .trim()
     }
 }
 

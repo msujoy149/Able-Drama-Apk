@@ -654,12 +654,29 @@ fun detectMediaType(url: String): DetectedResource? {
     val docExtensions = listOf(".pdf", ".epub", ".docx", ".xlsx", ".pptx", ".txt", ".doc", ".xls", ".csv", ".rtf")
     val archiveAndGeneralExtensions = listOf(".zip", ".rar", ".7z", ".apk", ".dmg", ".tar", ".gz", ".exe", ".bin", ".msi", ".iso", ".jar", ".json", ".xml", ".css", ".js", ".ts")
 
+    val isAudio = audioExtensions.any { cleanUrl.endsWith(it) } ||
+                  fullUrlLower.contains("audio_stream") || 
+                  fullUrlLower.contains("audioplayback")
+
+    if (isAudio) {
+        val ext = audioExtensions.firstOrNull { cleanUrl.endsWith(it) } ?: "mp3"
+        val displayType = "Audio ${ext.uppercase().replace(".", "")}"
+        var title = url.substringBefore("?").substringAfterLast("/").trim()
+        if (title.isBlank() || title.length < 3 || title.contains("audioplayback") || title.contains("audio_stream")) {
+            title = "Audio Media Resource"
+        }
+        return DetectedResource(
+            url = url,
+            title = title,
+            fileType = "Audio",
+            quality = displayType,
+            fileSize = 0L
+        )
+    }
+
     val isExcluded = imageExtensions.any { cleanUrl.endsWith(it) } ||
-                     audioExtensions.any { cleanUrl.endsWith(it) } ||
                      docExtensions.any { cleanUrl.endsWith(it) } ||
-                     archiveAndGeneralExtensions.any { cleanUrl.endsWith(it) } ||
-                     fullUrlLower.contains("audio_stream") || 
-                     fullUrlLower.contains("audioplayback")
+                     archiveAndGeneralExtensions.any { cleanUrl.endsWith(it) }
 
     if (isExcluded) {
         return null
@@ -831,12 +848,14 @@ fun injectVideoPlaybackObserver(webView: WebView?, tabId: String, viewModel: Bro
                    t === "resource" || 
                    t === "video_001" ||
                    t === "resource_001" || 
+                   t === "unknown_video" ||
                    t.indexOf("video stream") !== -1 ||
-                   t.indexOf("video link") !== -1;
+                   t.indexOf("video link") !== -1 ||
+                   t.indexOf("video resource") !== -1;
           }
 
           function getCleanPageTitle() {
-            // 1. Video Title
+            // Priority 1: YouTube specific titles
             var ytTitle = document.querySelector('h1.ytd-watch-metadata') || 
                            document.querySelector('h1.title.ytd-video-primary-info-renderer') ||
                            document.querySelector('.ytp-title-link');
@@ -845,85 +864,118 @@ fun injectVideoPlaybackObserver(webView: WebView?, tabId: String, viewModel: Bro
               if (txt && txt.trim() && !isGenericJsTitle(txt)) return txt.trim();
             }
 
-            var videos = document.querySelectorAll('video');
-            for (var i = 0; i < videos.length; i++) {
-              var label = videos[i].getAttribute('title') || videos[i].getAttribute('aria-label');
-              if (label && label.trim() && !isGenericJsTitle(label)) {
-                return label.trim();
+            // Priority 2: Facebook specific titles
+            var fbTitle = document.querySelector('[data-testid="post_message"]') || 
+                           document.querySelector('.story_body_container h3') ||
+                           document.querySelector('h1[id^="reels_"]');
+            if (fbTitle) {
+              var txt = fbTitle.innerText || fbTitle.textContent;
+              if (txt && txt.trim() && !isGenericJsTitle(txt)) return txt.trim();
+            }
+
+            // Priority 3: TikTok caption/title
+            var tiktokTitle = document.querySelector('[data-e2e="browse-video-desc"]') || 
+                               document.querySelector('.tiktok-video-desc') ||
+                               document.querySelector('h1[class*="Title"]');
+            if (tiktokTitle) {
+              var txt = tiktokTitle.innerText || tiktokTitle.textContent;
+              if (txt && txt.trim() && !isGenericJsTitle(txt)) return txt.trim();
+            }
+
+            // Priority 4: Bilibili video title
+            var biliTitle = document.querySelector('.video-title') || 
+                             document.querySelector('.title-box .title') ||
+                             document.querySelector('h1.video-title') ||
+                             document.querySelector('.bili-video-detail__info-title_txt');
+            if (biliTitle) {
+              var txt = biliTitle.innerText || biliTitle.textContent;
+              if (txt && txt.trim() && !isGenericJsTitle(txt)) return txt.trim();
+            }
+
+            // Priority 5: Standard headings indicating video/title
+            var selectors = [
+              'h1.entry-title', 'h1.post-title', 'h2.title', '.video-info-title', '.video-title-text',
+              '.mv-title', '.player-title', '.movie-title', '.video-name'
+            ];
+            for (var i = 0; i < selectors.length; i++) {
+              var el = document.querySelector(selectors[i]);
+              if (el) {
+                var txt = el.innerText || el.textContent;
+                if (txt && txt.trim() && !isGenericJsTitle(txt)) return txt.trim();
               }
             }
 
-            var headline = document.querySelector('h1.entry-title') || 
-                           document.querySelector('h1.post-title') ||
-                           document.querySelector('h1.title') ||
-                           document.querySelector('.video-title');
-            if (headline && headline.innerText && headline.innerText.trim()) {
-              var txt = headline.innerText.trim();
-              if (!isGenericJsTitle(txt)) return txt;
+            // Priority 6: Open Graph / Twitter meta tags (extremely reliable for video pages)
+            var metaSelectors = [
+              'meta[property="og:title"]',
+              'meta[name="twitter:title"]',
+              'meta[property="og:description"]',
+              'meta[name="title"]'
+            ];
+            for (var i = 0; i < metaSelectors.length; i++) {
+              var el = document.querySelector(metaSelectors[i]);
+              if (el && el.getAttribute('content')) {
+                var txt = el.getAttribute('content').trim();
+                if (txt && !isGenericJsTitle(txt)) return txt;
+              }
             }
 
-            // 2. Post Caption / Caption Description
-            var tiktokDesc = document.querySelector('[data-e2e="browse-video-desc"]') || 
-                             document.querySelector('[class*="StyledCaption"]') ||
-                             document.querySelector('.tiktok-video-desc');
-            if (tiktokDesc && tiktokDesc.innerText && tiktokDesc.innerText.trim()) {
-              var txt = tiktokDesc.innerText.trim();
-              if (!isGenericJsTitle(txt)) return txt;
-            }
-            
-            var fbDesc = document.querySelector('[data-ad-preview="message"]') || 
-                         document.querySelector('[class*="styled-text"]') ||
-                         document.querySelector('.post_message') ||
-                         document.querySelector('[data-testid="post_message"]');
-            if (fbDesc && fbDesc.innerText && fbDesc.innerText.trim()) {
-              var txt = fbDesc.innerText.trim();
-              if (!isGenericJsTitle(txt)) return txt;
-            }
-
-            // 3. Metadata Title (Open Graph / Twitter titles)
-            var ogTitle = document.querySelector('meta[property="og:title"]') || 
-                           document.querySelector('meta[name="twitter:title"]');
-            if (ogTitle && ogTitle.content && ogTitle.content.trim()) {
-              var txt = ogTitle.content.trim();
-              if (!isGenericJsTitle(txt)) return txt;
-            }
-
-            // 4. Page Title
+            // Priority 7: Page document title
             var t = document.title || "";
             if (t) {
               t = t.replace(/\s*-\s*YouTube/gi, "");
               t = t.replace(/\s*\|\s*Facebook/gi, "");
               t = t.replace(/\s*-\s*TikTok/gi, "");
               t = t.replace(/\s*-\s*Instagram/gi, "");
+              t = t.replace(/\s*-\s*bilibili/gi, "");
+              t = t.replace(/\s*-\s*BiliBili/gi, "");
               t = t.trim();
               if (t && !isGenericJsTitle(t)) {
                 return t;
               }
             }
-            return "Video Playback Theme";
+
+            return "Playable Video Stream";
           }
 
-          function findVideos() {
-            var allVideos = Array.from(document.querySelectorAll('video'));
-            var iframes = document.querySelectorAll('iframe');
-            for (var i = 0; i < iframes.length; i++) {
-              try {
-                var iframeDoc = iframes[i].contentDocument || iframes[i].contentWindow.document;
-                if (iframeDoc) {
-                  var iframeVideos = iframeDoc.querySelectorAll('video');
-                  for (var j = 0; j < iframeVideos.length; j++) {
-                    allVideos.push(iframeVideos[j]);
-                  }
-                }
-              } catch(e) {
-                // Cross-origin iframe, ignore
+          function findVideosAll(node, list) {
+            if (!node) return;
+            if (node.tagName === 'VIDEO') {
+              list.push(node);
+            }
+            if (node.children) {
+              for (var i = 0; i < node.children.length; i++) {
+                findVideosAll(node.children[i], list);
               }
             }
-            return allVideos;
+            if (node.shadowRoot) {
+              findVideosAll(node.shadowRoot, list);
+            }
+            if (node.tagName === 'IFRAME') {
+              try {
+                var iframeDoc = node.contentDocument || node.contentWindow.document;
+                if (iframeDoc) {
+                  findVideosAll(iframeDoc, list);
+                }
+              } catch(e) {}
+            }
+          }
+
+          function setupListeners(v) {
+            if (!v) return;
+            if (!v.hasAttribute('data-play-listener')) {
+              v.setAttribute('data-play-listener', 'true');
+              var events = ['play', 'playing', 'pause', 'ended', 'timeupdate', 'loadedmetadata', 'volumechange'];
+              events.forEach(function(ev) {
+                v.addEventListener(ev, checkVideos);
+              });
+            }
           }
 
           function checkVideos() {
-            var videos = findVideos();
+            var videos = [];
+            findVideosAll(document.documentElement, videos);
+            
             var anyPlaying = false;
             var anyStarted = false;
             var allEnded = true;
@@ -931,14 +983,18 @@ fun injectVideoPlaybackObserver(webView: WebView?, tabId: String, viewModel: Bro
             var activeTitle = getCleanPageTitle();
 
             var activeDuration = 0.0;
+            var activeWidth = 0;
+            var activeHeight = 0;
+
             if (videos.length > 0) {
               for (var i = 0; i < videos.length; i++) {
                 var v = videos[i];
+                setupListeners(v);
                 if (!v.paused && !v.ended) {
                   anyPlaying = true;
                 }
                 if (v.currentTime > 0.1 && !v.ended) {
-                  anyStarted = true;
+                   anyStarted = true;
                 }
                 if (!v.ended) {
                   allEnded = false;
@@ -946,10 +1002,18 @@ fun injectVideoPlaybackObserver(webView: WebView?, tabId: String, viewModel: Bro
                 if (!v.paused && (v.src || v.currentSrc)) {
                   activeSrc = v.src || v.currentSrc || "";
                   activeDuration = v.duration || 0.0;
+                  activeWidth = v.videoWidth || 0;
+                  activeHeight = v.videoHeight || 0;
                 }
               }
               if (activeDuration === 0.0 && videos[0]) {
                 activeDuration = videos[0].duration || 0.0;
+              }
+              if (activeWidth === 0 && videos[0]) {
+                activeWidth = videos[0].videoWidth || 0;
+              }
+              if (activeHeight === 0 && videos[0]) {
+                activeHeight = videos[0].videoHeight || 0;
               }
             } else {
               allEnded = false;
@@ -958,31 +1022,55 @@ fun injectVideoPlaybackObserver(webView: WebView?, tabId: String, viewModel: Bro
             var isPlaybackActive = anyPlaying || (anyStarted && !allEnded);
 
             if (window.VideoPlayObserver) {
-              window.VideoPlayObserver.onVideoState(isPlaybackActive, activeTitle, activeSrc, activeDuration);
-            }
-          }
-
-          function setupListeners() {
-            var videos = findVideos();
-            for (var i = 0; i < videos.length; i++) {
-              var v = videos[i];
-              if (!v.hasAttribute('data-play-listener')) {
-                v.setAttribute('data-play-listener', 'true');
-                v.addEventListener('play', checkVideos);
-                v.addEventListener('playing', checkVideos);
-                v.addEventListener('pause', checkVideos);
-                v.addEventListener('ended', checkVideos);
-                v.addEventListener('timeupdate', checkVideos);
+              if (typeof window.VideoPlayObserver.onVideoState === 'function') {
+                try {
+                  window.VideoPlayObserver.onVideoState(isPlaybackActive, activeTitle, activeSrc, activeDuration, activeWidth, activeHeight);
+                } catch(e) {
+                  window.VideoPlayObserver.onVideoState(isPlaybackActive, activeTitle, activeSrc, activeDuration);
+                }
               }
             }
           }
 
-          setupListeners();
+          // Override HTMLVideoElement.play dynamically to detect actions immediately
+          if (!HTMLVideoElement.prototype.originalPlay) {
+            HTMLVideoElement.prototype.originalPlay = HTMLVideoElement.prototype.play;
+            HTMLVideoElement.prototype.play = function() {
+              setupListeners(this);
+              setTimeout(checkVideos, 50);
+              return this.originalPlay.apply(this, arguments);
+            };
+          }
+
+          // Register event message listener to handle player postMessage events from iframes (e.g. YouTube, Vimeo)
+          window.addEventListener('message', function(event) {
+            try {
+              var data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+              if (data) {
+                // YouTube postMessage Player API detection
+                if (data.event === 'infoDelivery' && data.info) {
+                  var state = data.info.playerState;
+                  if (state === 1) { // 1 = playing
+                    if (window.VideoPlayObserver) {
+                      window.VideoPlayObserver.onVideoState(true, getCleanPageTitle(), "", 0.0, 0, 0);
+                    }
+                  }
+                }
+                // Vimeo postMessage player state API
+                if (data.event === 'play') {
+                  if (window.VideoPlayObserver) {
+                    window.VideoPlayObserver.onVideoState(true, getCleanPageTitle(), "", 0.0, 0, 0);
+                  }
+                }
+              }
+            } catch(e) {}
+          });
+
+          // Check on load
           checkVideos();
 
           if (window.MutationObserver) {
             var observer = new MutationObserver(function() {
-              setupListeners();
               checkVideos();
             });
             observer.observe(document.body, { childList: true, subtree: true });
@@ -1001,12 +1089,19 @@ class VideoPlayObserver(
     private val tabId: String
 ) {
     @android.webkit.JavascriptInterface
+    fun onVideoState(isPlaying: Boolean, title: String, currentSrc: String, duration: Double, videoWidth: Int, videoHeight: Int) {
+        viewModel.onVideoPlaybackStateChanged(tabId, isPlaying, title, currentSrc, duration, videoWidth, videoHeight)
+    }
+
+    @android.webkit.JavascriptInterface
     fun onVideoState(isPlaying: Boolean, title: String, currentSrc: String, duration: Double) {
-        viewModel.onVideoPlaybackStateChanged(tabId, isPlaying, title, currentSrc, duration)
+        viewModel.onVideoPlaybackStateChanged(tabId, isPlaying, title, currentSrc, duration, 0, 0)
     }
 
     @android.webkit.JavascriptInterface
     fun onVideoState(isPlaying: Boolean, title: String, currentSrc: String) {
-        viewModel.onVideoPlaybackStateChanged(tabId, isPlaying, title, currentSrc, 0.0)
+        viewModel.onVideoPlaybackStateChanged(tabId, isPlaying, title, currentSrc, 0.0, 0, 0)
     }
 }
+
+

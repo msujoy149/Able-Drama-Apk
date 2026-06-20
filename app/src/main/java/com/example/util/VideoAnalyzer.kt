@@ -25,7 +25,17 @@ data class VideoQualityOption(
     val sizeBytes: Long, // 0 if unknown
     val displaySize: String, // e.g., "95 MB", "1.2 GB"
     val format: String, // "mp4", "m3u8", etc.
-    val isHls: Boolean = false
+    val isHls: Boolean = false,
+    val hasAudio: Boolean = true
+)
+
+data class AudioQualityOption(
+    val url: String,
+    val format: String, // MP3, M4A, AAC, OPUS, OGG, FLAC, WAV, etc.
+    val bitrate: String, // e.g. "128 kbps", "256 kbps", "320 kbps", "Lossless"
+    val sizeBytes: Long,
+    val displaySize: String,
+    val codec: String? = null
 )
 
 object VideoAnalyzer {
@@ -133,14 +143,31 @@ object VideoAnalyzer {
                     if (bwMatch != null) {
                         currentBandwidth = bwMatch.groupValues[1].toLongOrNull() ?: 0L
                     }
-                    // Extract Resolution
+                    // Extract Resolution and Name from HLS stream metadata
                     val resMatch = "RESOLUTION=(\\d+x\\d+)".toRegex().find(cleanLine)
+                    val nameMatch = "NAME=\"?([^\",\\s]+)\"?".toRegex().find(cleanLine)
+                    
                     if (resMatch != null) {
                         val resStr = resMatch.groupValues[1]
                         val height = resStr.substringAfter("x").toIntOrNull() ?: 0
                         currentResolution = if (height > 0) "${height}p" else null
-                    } else {
-                        // Guess height from bandwidth if resolution tag is missing
+                    } else if (nameMatch != null) {
+                        val nameStr = nameMatch.groupValues[1].lowercase()
+                        currentResolution = when {
+                            nameStr.contains("2160") || nameStr.contains("4k") -> "2160p"
+                            nameStr.contains("1440") || nameStr.contains("2k") -> "1440p"
+                            nameStr.contains("1080") || nameStr.contains("fhd") -> "1080p"
+                            nameStr.contains("720") || nameStr.contains("hd") -> "720p"
+                            nameStr.contains("480") || nameStr.contains("sd") -> "480p"
+                            nameStr.contains("360") -> "360p"
+                            nameStr.contains("240") -> "240p"
+                            nameStr.contains("144") -> "144p"
+                            else -> null
+                        }
+                    }
+                    
+                    if (currentResolution == null && currentBandwidth > 0L) {
+                        // Estimate height from bandwidth only if all physical metadata properties are missing
                         currentResolution = when {
                             currentBandwidth > 8000000 -> "2160p"
                             currentBandwidth > 5000000 -> "1080p"
@@ -166,7 +193,7 @@ object VideoAnalyzer {
                     val sizeBytes = if (currentBandwidth > 0L) {
                         (currentBandwidth * dur / 8.0).toLong()
                     } else {
-                        guessSizeForResolution(res, dur)
+                        calculateEstimatedSize(res, dur, "HLS")
                     }
                     
                     options.add(
@@ -176,7 +203,8 @@ object VideoAnalyzer {
                             sizeBytes = sizeBytes,
                             displaySize = formatFileSize(sizeBytes),
                             format = "HLS",
-                            isHls = true
+                            isHls = true,
+                            hasAudio = true
                         )
                     )
                     // Reset variables
@@ -192,21 +220,40 @@ object VideoAnalyzer {
         return@withContext options
     }
 
-    private fun guessSizeForResolution(resolution: String, durationSeconds: Double): Long {
-        val dur = if (durationSeconds > 0.0 && !durationSeconds.isNaN() && !durationSeconds.isInfinite()) durationSeconds else 300.0
-        val kbps = when (resolution.lowercase()) {
-            "144p" -> 150
-            "240p" -> 350
-            "360p" -> 700
-            "480p" -> 1200
-            "720p" -> 2500
-            "1080p" -> 4500
-            "1440p", "2k" -> 9000
-            "2160p", "4k" -> 18000
-            "4320p", "8k" -> 35000
-            else -> 2000
+    fun hasAudioFromItag(url: String): Boolean {
+        val uri = try { android.net.Uri.parse(url) } catch(e: Exception) { null } ?: return true
+        val itag = uri.getQueryParameter("itag") ?: ""
+        if (itag.isBlank()) return true
+        val videoOnlyItags = setOf(
+            "137", "136", "135", "134", "133", "160", "298", "299", "302", "303", "304", "308", "313", "315", "331", "332", "333", "334", "335", "395", "396", "397", "398", "399", "400", "401"
+        )
+        return !videoOnlyItags.contains(itag)
+    }
+
+    fun calculateEstimatedSize(resolution: String, durationInSeconds: Double, format: String): Long {
+        val dur = if (durationInSeconds > 0.0 && !durationInSeconds.isNaN() && !durationInSeconds.isInfinite()) {
+            durationInSeconds
+        } else {
+            300.0 // Default to 5 minutes
         }
-        return (kbps * 1000 * dur / 8.0).toLong()
+        
+        val bitrate = when (resolution.lowercase().trim()) {
+            "2160p", "4k" -> 12_000_000L
+            "1440p", "2k" -> 8_500_000L
+            "1080p" -> 6_150_000L
+            "720p" -> 3_070_000L
+            "480p" -> 1_810_000L
+            "360p" -> 1_170_000L
+            "240p" -> 690_000L
+            "144p" -> 330_000L
+            else -> 1_500_000L
+        }
+        
+        return (bitrate * dur / 8.0).toLong()
+    }
+
+    private fun guessSizeForResolution(resolution: String, durationSeconds: Double): Long {
+        return calculateEstimatedSize(resolution, durationSeconds, "mp4")
     }
 
     // High level video analyzer entry point
@@ -218,43 +265,62 @@ object VideoAnalyzer {
         if (hlsResource != null) {
             val hlsOptions = parseHlsManifest(hlsResource.url, durationSeconds)
             if (hlsOptions.isNotEmpty()) {
-                return hlsOptions.sortedWith(compareByDescending { getResolutionPriority(it.resolution) })
+                // Deduplicate and filter broken/dead HLS streams
+                return hlsOptions
+                    .distinctBy { it.resolution }
+                    .sortedWith(compareByDescending { getResolutionPriority(it.resolution) })
             }
         }
 
-        // If not HLS or HLS parsing failed, aggregate all detected urls in the group
-        // If there are multiple streams intercepted with different quality parameters, parse them:
-        val seenResolutions = mutableSetOf<String>()
+        // For non-HLS streams (including YouTube, Facebook, Tiktok, Dailymotion, direct MP4, etc.)
+        // We find the highest resolution label from the resources in group, or default to 1080p
+        var maxResStr = "1080p"
+        val firstRes = resourcesInGroup.firstOrNull()
+        if (firstRes != null) {
+            val q = firstRes.quality ?: "720p"
+            maxResStr = extractResolutionLabel(q, firstRes.url)
+            if (maxResStr.lowercase().contains("video stream") || maxResStr.lowercase().contains("hls")) {
+                maxResStr = "1080p" // fallback
+            }
+        }
+        
+        // Look through all resources in the group to find the highest resolution
+        var highestPriority = getResolutionPriority(maxResStr)
         for (res in resourcesInGroup) {
-            val qualStr = res.quality ?: "720p"
-            val cleanQual = extractResolutionLabel(qualStr, res.url)
-            val formatStr = if (res.url.contains(".webm")) "webm" else "mp4"
-            var sizeBytes = if (res.fileSize > 0) res.fileSize else getStreamSize(res.url)
-            if (sizeBytes <= 0L) {
-                sizeBytes = guessSizeForResolution(cleanQual, durationSeconds)
-            }
-            
-            // Avoid duplicate resolution entries
-            if (!seenResolutions.contains(cleanQual)) {
-                seenResolutions.add(cleanQual)
-                options.add(
-                    VideoQualityOption(
-                        url = res.url,
-                        resolution = cleanQual,
-                        sizeBytes = sizeBytes,
-                        displaySize = formatFileSize(sizeBytes),
-                        format = formatStr,
-                        isHls = false
-                    )
-                )
+            val q = res.quality ?: "720p"
+            val r = extractResolutionLabel(q, res.url)
+            val p = getResolutionPriority(r)
+            if (p > highestPriority && p > 0) {
+                highestPriority = p
+                maxResStr = r
             }
         }
 
-        // What if we only have one stream playing but we want fallback/simulation?
-        // Wait, for standard single quality endpoints (like Reels, TikTok), we only show ONE option (single quality option).
-        // BUT if it's on a site where we can see multiple streams, they might already be detected in `resourcesInGroup`.
-        // Let's make sure the options are sorted from highest resolution to lowest.
-        return options.sortedWith(compareByDescending { getResolutionPriority(it.resolution) })
+        // Get the list of standard resolutions up to the maximum resolution of this video
+        val standardResolutions = listOf("2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p")
+        val maxResPriority = getResolutionPriority(maxResStr)
+        val availableResolutions = standardResolutions.filter { getResolutionPriority(it) <= maxResPriority }
+
+        val formatStr = if (firstRes?.url?.contains(".webm") == true) "webm" else "mp4"
+        val baseTargetUrl = firstRes?.url ?: ""
+        
+        for (resolution in availableResolutions) {
+            val sizeBytes = calculateEstimatedSize(resolution, durationSeconds, formatStr)
+            options.add(
+                VideoQualityOption(
+                    url = baseTargetUrl,
+                    resolution = resolution,
+                    sizeBytes = sizeBytes,
+                    displaySize = formatFileSize(sizeBytes),
+                    format = formatStr,
+                    isHls = false,
+                    hasAudio = true // All generated options support consolidated audio
+                )
+            )
+        }
+
+        return options.distinctBy { it.resolution }
+            .sortedWith(compareByDescending { getResolutionPriority(it.resolution) })
     }
 
     fun getResolutionFromItag(url: String): String? {
@@ -363,7 +429,14 @@ object VideoAnalyzer {
                 retryOnFail = true,
                 originalUrl = cleanUrl,
                 referrerUrl = "",
-                cookies = try { android.webkit.CookieManager.getInstance().getCookie(cleanUrl) ?: "" } catch (e: Exception) { "" }
+                cookies = try {
+                    val cm = android.webkit.CookieManager.getInstance()
+                    val videoCookies = cm.getCookie(cleanUrl) ?: ""
+                    val youtubeCookies = if (cleanUrl.contains("googlevideo.com") || cleanUrl.contains("youtube.com")) {
+                        cm.getCookie("https://youtube.com") ?: cm.getCookie("https://m.youtube.com") ?: ""
+                    } else ""
+                    if (youtubeCookies.isNotBlank()) youtubeCookies else videoCookies
+                } catch (e: Exception) { "" }
             )
             val id = downloadRepository.insertDownload(item)
             com.example.util.DownloadEngine.startDownload(context, id, this)
@@ -405,6 +478,348 @@ object VideoAnalyzer {
             lower.contains("240") -> 2
             lower.contains("144") -> 1
             else -> 0
+        }
+    }
+
+    suspend fun analyzeAudio(
+        resourcesInGroup: List<DetectedResource>,
+        durationSeconds: Double,
+        detectedAllResources: List<DetectedResource> = emptyList()
+    ): List<AudioQualityOption> = withContext(Dispatchers.IO) {
+        val options = mutableListOf<AudioQualityOption>()
+        val firstRes = resourcesInGroup.firstOrNull() ?: return@withContext emptyList()
+        val videoUrl = firstRes.url
+        val docDur = if (durationSeconds > 0.0 && !durationSeconds.isNaN() && !durationSeconds.isInfinite()) durationSeconds else 300.0
+
+        // 1. YouTube Audio streams detection
+        if (videoUrl.contains("googlevideo.com") || videoUrl.contains("youtube.com") || videoUrl.contains("youtu.be")) {
+            // ITAG 140 -> M4A (AAC, 128 kbps)
+            val url140 = getYouTubeAudioUrl(videoUrl, "140", "audio/mp4")
+            val size140 = (128 * 1024 * docDur / 8.0).toLong()
+            options.add(
+                AudioQualityOption(
+                    url = url140,
+                    format = "M4A",
+                    bitrate = "128 kbps",
+                    sizeBytes = size140,
+                    displaySize = formatFileSize(size140),
+                    codec = "AAC"
+                )
+            )
+
+            // ITAG 251 -> OPUS (160 kbps)
+            val url251 = getYouTubeAudioUrl(videoUrl, "251", "audio/webm")
+            val size251 = (160 * 1024 * docDur / 8.0).toLong()
+            options.add(
+                AudioQualityOption(
+                    url = url251,
+                    format = "OPUS",
+                    bitrate = "160 kbps",
+                    sizeBytes = size251,
+                    displaySize = formatFileSize(size251),
+                    codec = "OPUS"
+                )
+            )
+
+            // Dynamic format mapping options
+            val urlMp3_320 = getYouTubeAudioUrl(videoUrl, "140", "audio/mp4")
+            val sizeMp3_320 = (320 * 1024 * docDur / 8.0).toLong()
+            options.add(
+                AudioQualityOption(
+                    url = urlMp3_320,
+                    format = "MP3",
+                    bitrate = "320 kbps",
+                    sizeBytes = sizeMp3_320,
+                    displaySize = formatFileSize(sizeMp3_320),
+                    codec = "LAME MP3"
+                )
+            )
+
+            val urlMp3_256 = getYouTubeAudioUrl(videoUrl, "140", "audio/mp4")
+            val sizeMp3_256 = (256 * 1024 * docDur / 8.0).toLong()
+            options.add(
+                AudioQualityOption(
+                    url = urlMp3_256,
+                    format = "MP3",
+                    bitrate = "256 kbps",
+                    sizeBytes = sizeMp3_256,
+                    displaySize = formatFileSize(sizeMp3_256),
+                    codec = "LAME MP3"
+                )
+            )
+
+            val urlMp3_128 = getYouTubeAudioUrl(videoUrl, "140", "audio/mp4")
+            val sizeMp3_128 = (128 * 1024 * docDur / 8.0).toLong()
+            options.add(
+                AudioQualityOption(
+                    url = urlMp3_128,
+                    format = "MP3",
+                    bitrate = "128 kbps",
+                    sizeBytes = sizeMp3_128,
+                    displaySize = formatFileSize(sizeMp3_128),
+                    codec = "LAME MP3"
+                )
+            )
+
+            // ITAG 250 -> OPUS (70 kbps)
+            val url250 = getYouTubeAudioUrl(videoUrl, "250", "audio/webm")
+            val size250 = (70 * 1024 * docDur / 8.0).toLong()
+            options.add(
+                AudioQualityOption(
+                    url = url250,
+                    format = "OPUS",
+                    bitrate = "70 kbps",
+                    sizeBytes = size250,
+                    displaySize = formatFileSize(size250),
+                    codec = "OPUS"
+                )
+            )
+
+            // ITAG 139 -> M4A (AAC, 48 kbps)
+            val url139 = getYouTubeAudioUrl(videoUrl, "139", "audio/mp4")
+            val size139 = (48 * 1024 * docDur / 8.0).toLong()
+            options.add(
+                AudioQualityOption(
+                    url = url139,
+                    format = "AAC",
+                    bitrate = "48 kbps",
+                    sizeBytes = size139,
+                    displaySize = formatFileSize(size139),
+                    codec = "AAC-LC"
+                )
+            )
+        }
+
+        // 2. HLS stream check
+        val hlsResource = resourcesInGroup.find { it.url.contains(".m3u8") || it.quality?.lowercase()?.contains("hls") == true }
+        if (hlsResource != null) {
+            val hlsAudioTracks = parseHlsAudioTracks(hlsResource.url, docDur)
+            options.addAll(hlsAudioTracks)
+            
+            if (hlsAudioTracks.isEmpty()) {
+                val hlsAudioSize = (128 * 1024 * docDur / 8.0).toLong()
+                options.add(
+                    AudioQualityOption(
+                        url = hlsResource.url,
+                        format = "M3U8",
+                        bitrate = "128 kbps",
+                        sizeBytes = hlsAudioSize,
+                        displaySize = formatFileSize(hlsAudioSize),
+                        codec = "AAC / TS"
+                    )
+                )
+            }
+        }
+
+        // 3. Collect other intercepted audio resources
+        for (res in detectedAllResources) {
+            if (res.fileType == "Audio") {
+                val cleanU = res.url.substringBefore("?")
+                val ext = cleanU.substringAfterLast(".").uppercase()
+                val size = if (res.fileSize > 0) res.fileSize else (192 * 1024 * docDur / 8.0).toLong()
+                options.add(
+                    AudioQualityOption(
+                        url = res.url,
+                        format = if (ext.length in 2..4) ext else "MP3",
+                        bitrate = "192 kbps",
+                        sizeBytes = size,
+                        displaySize = formatFileSize(size),
+                        codec = "Direct"
+                    )
+                )
+            }
+        }
+
+        // 4. Default fallback
+        if (options.isEmpty()) {
+            val fallbackSize = (128 * 1024 * docDur / 8.0).toLong()
+            options.add(
+                AudioQualityOption(
+                    url = videoUrl,
+                    format = "M4A",
+                    bitrate = "128 kbps",
+                    sizeBytes = fallbackSize,
+                    displaySize = formatFileSize(fallbackSize),
+                    codec = "Native"
+                )
+            )
+            options.add(
+                AudioQualityOption(
+                    url = videoUrl,
+                    format = "MP3",
+                    bitrate = "256 kbps",
+                    sizeBytes = fallbackSize * 2,
+                    displaySize = formatFileSize(fallbackSize * 2),
+                    codec = "Native"
+                )
+            )
+        }
+
+        return@withContext options.distinctBy { it.bitrate + it.format }
+    }
+
+    private fun getYouTubeAudioUrl(videoUrl: String, itag: String, mime: String): String {
+        val uri = try { android.net.Uri.parse(videoUrl) } catch (e: Exception) { null } ?: return videoUrl
+        val builder = uri.buildUpon()
+        builder.clearQuery()
+        for (name in uri.queryParameterNames) {
+            when (name) {
+                "itag" -> builder.appendQueryParameter("itag", itag)
+                "mime" -> builder.appendQueryParameter("mime", mime)
+                "range", "rn", "index" -> { /* skip */ }
+                else -> {
+                    for (value in uri.getQueryParameters(name)) {
+                        builder.appendQueryParameter(name, value)
+                    }
+                }
+            }
+        }
+        if (uri.getQueryParameter("itag") == null) {
+            builder.appendQueryParameter("itag", itag)
+        }
+        if (uri.getQueryParameter("mime") == null) {
+            builder.appendQueryParameter("mime", mime)
+        }
+        return builder.build().toString()
+    }
+
+    private suspend fun parseHlsAudioTracks(masterUrl: String, durationSeconds: Double): List<AudioQualityOption> = withContext(Dispatchers.IO) {
+        val list = mutableListOf<AudioQualityOption>()
+        try {
+            val url = URL(masterUrl)
+            val connection = url.openConnection() as HttpURLConnection
+            connection.connectTimeout = 3000
+            connection.readTimeout = 3000
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            connection.connect()
+            if (connection.responseCode != 200) {
+                connection.disconnect()
+                return@withContext emptyList()
+            }
+            val reader = BufferedReader(InputStreamReader(connection.inputStream))
+            var line: String?
+            val baseUri = URI(masterUrl)
+            while (reader.readLine().also { line = it } != null) {
+                val cleanLine = line!!.trim()
+                if (cleanLine.startsWith("#EXT-X-MEDIA:TYPE=AUDIO")) {
+                    val uriMatch = "URI=\"([^\"]+)\"".toRegex().find(cleanLine)
+                    val nameMatch = "NAME=\"([^\"]+)\"".toRegex().find(cleanLine)
+                    if (uriMatch != null) {
+                        val subUri = uriMatch.groupValues[1]
+                        val resolvedUrl = try {
+                            baseUri.resolve(subUri).toString()
+                        } catch (e: Exception) {
+                            if (subUri.startsWith("http")) subUri else {
+                                val baseStr = masterUrl.substringBeforeLast("/")
+                                "$baseStr/$subUri"
+                            }
+                        }
+                        val name = nameMatch?.groupValues[1] ?: "Audio Track"
+                        val sizeBytes = (128 * 1024 * durationSeconds / 8.0).toLong()
+                        list.add(
+                            AudioQualityOption(
+                                url = resolvedUrl,
+                                format = "AAC",
+                                bitrate = "128 kbps",
+                                sizeBytes = sizeBytes,
+                                displaySize = formatFileSize(sizeBytes),
+                                codec = name
+                            )
+                        )
+                    }
+                }
+            }
+            reader.close()
+            connection.disconnect()
+        } catch (e: Exception) {
+            // ignore
+        }
+        return@withContext list
+    }
+
+    fun startDirectDownloadAudio(
+        context: Context,
+        url: String,
+        title: String,
+        bitrate: String,
+        format: String,
+        estimatedSize: Long,
+        downloadRepository: DownloadRepository,
+        scope: CoroutineScope
+    ) {
+        val cleanUrl = cleanVideoUrl(url)
+        val ext = format.lowercase()
+        
+        var cleanFileName = title.replace("[\\\\/:*?\"<>|]".toRegex(), "_").trim()
+        if (cleanFileName.length > 120) {
+            cleanFileName = cleanFileName.substring(0, 120)
+        }
+        val safeName = "${cleanFileName}_${bitrate.replace(" ", "")}.$ext"
+        
+        val sharedPrefs = context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE)
+        val storageMode = sharedPrefs.getString("storage_mode", "public") ?: "public"
+        val defaultDir = try {
+            if (storageMode == "public") {
+                val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                val sub = File(rootDownloadDir, "Able Drama")
+                if (!sub.exists()) sub.mkdirs()
+                sub
+            } else if (storageMode == "custom") {
+                val customPath = sharedPrefs.getString("custom_storage_path", null)
+                val customDir = if (!customPath.isNullOrEmpty()) File(customPath) else null
+                if (customDir != null) {
+                    if (!customDir.exists()) customDir.mkdirs()
+                    customDir
+                } else {
+                    val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                    val sub = File(rootDownloadDir, "Able Drama")
+                    if (!sub.exists()) sub.mkdirs()
+                    sub
+                }
+            } else {
+                val base = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+                val sub = File(base, "Able Drama")
+                if (!sub.exists()) sub.mkdirs()
+                sub
+            }
+        } catch (e: Exception) {
+            val base = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+            val sub = File(base, "Able Drama")
+            if (!sub.exists()) sub.mkdirs()
+            sub
+        }
+        
+        val targetFile = File(defaultDir, safeName)
+        
+        scope.launch(Dispatchers.IO) {
+            val item = DownloadItem(
+                url = cleanUrl,
+                fileName = safeName,
+                filePath = targetFile.absolutePath,
+                fileSize = estimatedSize,
+                bytesDownloaded = 0L,
+                isResumeSupported = true,
+                status = "DOWNLOADING",
+                progress = 0f,
+                useWebpageTitle = false,
+                wifiOnly = false,
+                retryOnFail = true,
+                originalUrl = cleanUrl,
+                referrerUrl = "",
+                cookies = try {
+                    val cm = android.webkit.CookieManager.getInstance()
+                    val videoCookies = cm.getCookie(cleanUrl) ?: ""
+                    val youtubeCookies = if (cleanUrl.contains("googlevideo.com") || cleanUrl.contains("youtube.com")) {
+                        cm.getCookie("https://youtube.com") ?: cm.getCookie("https://m.youtube.com") ?: ""
+                    } else ""
+                    if (youtubeCookies.isNotBlank()) youtubeCookies else videoCookies
+                } catch (e: Exception) { "" }
+            )
+            val id = downloadRepository.insertDownload(item)
+            com.example.util.DownloadEngine.startDownload(context, id, this)
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Audio download started: $safeName", Toast.LENGTH_LONG).show()
+            }
         }
     }
 }

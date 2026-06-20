@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Able Drama</string>
+    <string name="empty_attribution_tag" translatable="false"></string>
 </resources>

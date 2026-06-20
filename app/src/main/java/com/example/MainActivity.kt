@@ -37,6 +37,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.focusable
+import com.example.util.Adaptive
+import com.example.util.adaptiveClickable
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.CircleShape
@@ -262,20 +267,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Pre-create WebView cache/code cache directories to prevent Chromium readdir/file info errors
-        try {
-            val webViewCacheJs = java.io.File(applicationContext.cacheDir, "WebView/Default/HTTP Cache/Code Cache/js")
-            if (!webViewCacheJs.exists()) {
-                webViewCacheJs.mkdirs()
-            }
-            val webViewCacheWasm = java.io.File(applicationContext.cacheDir, "WebView/Default/HTTP Cache/Code Cache/wasm")
-            if (!webViewCacheWasm.exists()) {
-                webViewCacheWasm.mkdirs()
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Failed to pre-create WebView cache directories", e)
-        }
-
         // Build Local Room database instance
         val db = AppDatabase.getDatabase(applicationContext)
 
@@ -357,6 +348,18 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(prefs.getBoolean("is_dark_theme", true))
             }
 
+            androidx.compose.runtime.DisposableEffect(prefs) {
+                val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
+                    if (key == "is_dark_theme") {
+                        isDarkTheme = p.getBoolean("is_dark_theme", true)
+                    }
+                }
+                prefs.registerOnSharedPreferenceChangeListener(listener)
+                onDispose {
+                    prefs.unregisterOnSharedPreferenceChangeListener(listener)
+                }
+            }
+
             LaunchedEffect(isDarkTheme) {
                 browserViewModel?.setDarkTheme(isDarkTheme)
             }
@@ -428,7 +431,7 @@ class MainActivity : ComponentActivity() {
                                     onToggleDarkTheme = {
                                         val nextTheme = !isDarkTheme
                                         isDarkTheme = nextTheme
-                                        prefs.edit().putBoolean("is_dark_theme", nextTheme).apply()
+                                        prefs.edit().putBoolean("is_dark_theme", nextTheme).putString("theme_mode", if (nextTheme) "dark" else "light").apply()
                                     },
                                     onShowCustomView = { view, callback ->
                                         customView = view
@@ -567,9 +570,37 @@ fun MainAppContent(
     var showExitDialog by remember { mutableStateOf(false) }
     var showReturnToDramaDialog by remember { mutableStateOf(false) }
 
+    fun exitAndBackToHome() {
+        val restoredState = if (dramaSaveStack.isNotEmpty()) {
+            dramaSaveStack.removeAt(dramaSaveStack.size - 1)
+        } else {
+            null
+        }
+        
+        android.util.Log.d("NavHistory", "Exit to home; restored drama state: $restoredState")
+        
+        // Enforce the Main Menu is completely bypassed on return
+        currentTab = AppTab.BROWSER
+        viewModel.setDramaModeActive(true)
+        showUrlBar = false
+        
+        // Clear all Main Menu entries from standard navigation history so back clicks bypass it too
+        navHistory.removeAll { it.tab == AppTab.ACCOUNT }
+        
+        // Return directly with zero reload and zero scroll resetting if it's already on that URL
+        val targetUrl = restoredState?.url ?: lastDramaUrl
+        if (targetUrl.isNotEmpty() && targetUrl != currentUrl) {
+            viewModel.loadUrl(targetUrl)
+        }
+        
+        showDownloadManagerDialog = false
+        showBrowserHistoryDialog = false
+        showAboutBrowserDialog = false
+    }
+
     LaunchedEffect(viewModel) {
         viewModel.triggerReturnToDramaDialog.collect {
-            showReturnToDramaDialog = true
+            exitAndBackToHome()
         }
     }
 
@@ -632,34 +663,6 @@ fun MainAppContent(
         return false
     }
 
-    fun exitAndBackToHome() {
-        val restoredState = if (dramaSaveStack.isNotEmpty()) {
-            dramaSaveStack.removeAt(dramaSaveStack.size - 1)
-        } else {
-            null
-        }
-        
-        android.util.Log.d("NavHistory", "Exit to home; restored drama state: $restoredState")
-        
-        // Enforce the Main Menu is completely bypassed on return
-        currentTab = AppTab.BROWSER
-        viewModel.setDramaModeActive(true)
-        showUrlBar = false
-        
-        // Clear all Main Menu entries from standard navigation history so back clicks bypass it too
-        navHistory.removeAll { it.tab == AppTab.ACCOUNT }
-        
-        // Return directly with zero reload and zero scroll resetting if it's already on that URL
-        val targetUrl = restoredState?.url ?: lastDramaUrl
-        if (targetUrl.isNotEmpty() && targetUrl != currentUrl) {
-            viewModel.loadUrl(targetUrl)
-        }
-        
-        showDownloadManagerDialog = false
-        showBrowserHistoryDialog = false
-        showAboutBrowserDialog = false
-    }
-
     // Graceful back handling for all tabs, views, and overlays
     androidx.activity.compose.BackHandler(enabled = true) {
         when {
@@ -684,7 +687,14 @@ fun MainAppContent(
             showTelegramDialog -> {
                 showTelegramDialog = false
             }
-            currentTab == AppTab.BROWSER && canGoBack -> {
+            currentTab == AppTab.BROWSER && !isDramaModeActive -> {
+                if (canGoBack) {
+                    viewModel.goBack()
+                } else {
+                    exitAndBackToHome()
+                }
+            }
+            currentTab == AppTab.BROWSER && isDramaModeActive && canGoBack -> {
                 viewModel.goBack()
             }
             else -> {
@@ -699,14 +709,10 @@ fun MainAppContent(
                         currentTab = AppTab.BROWSER
                         showUrlBar = false
                     } else if (!isAtHome) {
-                        viewModel.loadUrl("browser://home")
+                        viewModel.loadUrl("https://www.abledrama.top")
                         showUrlBar = false
                     } else {
-                        if (!isDramaModeActive) {
-                            showReturnToDramaDialog = true
-                        } else {
-                            showExitDialog = true
-                        }
+                        showExitDialog = true
                     }
                 }
             }
@@ -1133,9 +1139,9 @@ fun MainAppContent(
 
                             // Floating Download Button on the right-middle side of the screen
                             androidx.compose.animation.AnimatedVisibility(
-                                visible = isVideoPlaying && currentDetectedResources.isNotEmpty() && viewModel.isDownloadablePage(currentUrl),
-                                enter = fadeIn() + scaleIn(),
-                                exit = fadeOut() + scaleOut(),
+                                visible = currentDetectedResources.isNotEmpty() && viewModel.isDownloadablePage(currentUrl),
+                                enter = fadeIn(animationSpec = androidx.compose.animation.core.tween(200)) + scaleIn(animationSpec = androidx.compose.animation.core.tween(200)),
+                                exit = fadeOut(animationSpec = androidx.compose.animation.core.tween(200)) + scaleOut(animationSpec = androidx.compose.animation.core.tween(200)),
                                 modifier = Modifier
                                     .align(Alignment.CenterEnd)
                                     .offset(y = 80.dp)
@@ -1152,7 +1158,7 @@ fun MainAppContent(
                                     colors = CardDefaults.cardColors(
                                         containerColor = Color(0xFFD0BCFF)
                                     ),
-                                    elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
+                                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
                                 ) {
                                     Box(
                                         modifier = Modifier.fillMaxSize(),
@@ -1247,6 +1253,7 @@ fun MainAppContent(
             ) {
                 Surface(
                     modifier = Modifier
+                        .widthIn(max = 560.dp)
                         .fillMaxWidth()
                         .padding(horizontal = 20.dp)
                         .clip(RoundedCornerShape(24.dp)),
@@ -1256,14 +1263,42 @@ fun MainAppContent(
                     val analyzedVideoQualities = remember { mutableStateMapOf<String, List<com.example.util.VideoQualityOption>>() }
                     var isAnalyzingVideo by remember { mutableStateOf(false) }
 
-                    LaunchedEffect(currentDetectedResources, activeDuration) {
+                    val analyzedAudioQualities = remember { mutableStateMapOf<String, List<com.example.util.AudioQualityOption>>() }
+                    var isAnalyzingAudio by remember { mutableStateOf(false) }
+
+                    val detectedAllResourcesMap by viewModel.detectedResources.collectAsStateWithLifecycle()
+                    val detectedAllResourcesList = remember(detectedAllResourcesMap, selectedTabId) {
+                        detectedAllResourcesMap[selectedTabId] ?: emptyList()
+                    }
+
+                    LaunchedEffect(currentDetectedResources, activeDuration, selectedTabId, detectedAllResourcesList) {
                         isAnalyzingVideo = true
-                        val grouped = currentDetectedResources.groupBy { it.title }
-                        for ((title, resources) in grouped) {
-                            val options = com.example.util.VideoAnalyzer.analyze(resources, activeDuration)
-                            analyzedVideoQualities[title] = options
+                        isAnalyzingAudio = true
+                        val cleanTitle = viewModel.getCleanActiveVideoTitle(selectedTabId)
+                        val modifiedResources = currentDetectedResources.map { res ->
+                            res.copy(title = cleanTitle)
+                        }.distinctBy { it.url }
+                        val grouped = modifiedResources.groupBy { it.title }
+                        withContext(Dispatchers.IO) {
+                            val tempQualities = mutableMapOf<String, List<com.example.util.VideoQualityOption>>()
+                            val tempAudioQualities = mutableMapOf<String, List<com.example.util.AudioQualityOption>>()
+                            for ((title, resources) in grouped) {
+                                val options = com.example.util.VideoAnalyzer.analyze(resources, activeDuration)
+                                tempQualities[title] = options
+                                
+                                val audioOptions = com.example.util.VideoAnalyzer.analyzeAudio(resources, activeDuration, detectedAllResourcesList)
+                                tempAudioQualities[title] = audioOptions
+                            }
+                            withContext(Dispatchers.Main) {
+                                analyzedVideoQualities.clear()
+                                analyzedVideoQualities.putAll(tempQualities)
+                                isAnalyzingVideo = false
+                                
+                                analyzedAudioQualities.clear()
+                                analyzedAudioQualities.putAll(tempAudioQualities)
+                                isAnalyzingAudio = false
+                            }
                         }
-                        isAnalyzingVideo = false
                     }
 
                     Column(
@@ -1321,8 +1356,23 @@ fun MainAppContent(
                             modifier = Modifier.padding(vertical = 16.dp)
                         )
 
-                        val groupedVideos = remember(currentDetectedResources) {
-                            currentDetectedResources.groupBy { it.title }
+                        val groupedVideos = remember(currentDetectedResources, selectedTabId) {
+                            val cleanTitle = viewModel.getCleanActiveVideoTitle(selectedTabId)
+                            val modifiedResources = currentDetectedResources.map { res ->
+                                res.copy(title = cleanTitle)
+                            }.distinctBy { it.url }
+                            modifiedResources.groupBy { res -> res.title }
+                        }
+
+                        val cleanTitle = viewModel.getCleanActiveVideoTitle(selectedTabId)
+                        val sortedVideoTitles = remember(groupedVideos, selectedTabId) {
+                            groupedVideos.keys.toList().sortedWith { t1, t2 ->
+                                when {
+                                    t1 == cleanTitle && t2 != cleanTitle -> -1
+                                    t2 == cleanTitle && t1 != cleanTitle -> 1
+                                    else -> t1.compareTo(t2)
+                                }
+                            }
                         }
 
                         LazyColumn(
@@ -1331,9 +1381,11 @@ fun MainAppContent(
                                 .heightIn(max = 420.dp),
                             verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
-                            items(groupedVideos.keys.toList()) { videoTitle ->
+                            items(sortedVideoTitles) { videoTitle ->
                                 val resourcesInGroup = groupedVideos[videoTitle] ?: emptyList()
                                 val qualities = analyzedVideoQualities[videoTitle] ?: emptyList()
+                                val isCurrentPlaying = (videoTitle == cleanTitle)
+                                var activeTab by rememberSaveable { mutableStateOf("video") }
 
                                 Card(
                                     modifier = Modifier.fillMaxWidth(),
@@ -1341,20 +1393,90 @@ fun MainAppContent(
                                         containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
                                     ),
                                     shape = RoundedCornerShape(16.dp),
-                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+                                    border = BorderStroke(
+                                        width = if (isCurrentPlaying) 1.5.dp else 1.dp,
+                                        color = if (isCurrentPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
+                                    )
                                 ) {
                                     Column(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(16.dp)
                                     ) {
-                                        Text(
-                                            text = "VIDEO",
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            letterSpacing = 1.2.sp
-                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Surface(
+                                                    onClick = { activeTab = "video" },
+                                                    color = if (activeTab == "video") MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else Color.Transparent,
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    border = BorderStroke(
+                                                        width = 1.dp,
+                                                        color = if (activeTab == "video") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                                                    )
+                                                ) {
+                                                    Text(
+                                                        text = "VIDEO",
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = if (activeTab == "video") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                                        letterSpacing = 1.2.sp,
+                                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                                    )
+                                                }
+
+                                                Surface(
+                                                    onClick = { activeTab = "audio" },
+                                                    color = if (activeTab == "audio") MaterialTheme.colorScheme.error.copy(alpha = 0.15f) else Color.Transparent,
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    border = BorderStroke(
+                                                        width = 1.dp,
+                                                        color = if (activeTab == "audio") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                                                    ),
+                                                    modifier = Modifier.testTag("audio_tab_button")
+                                                ) {
+                                                    Text(
+                                                        text = "AUDIO",
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = if (activeTab == "audio") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                                        letterSpacing = 1.2.sp,
+                                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                                    )
+                                                }
+                                            }
+                                            if (isCurrentPlaying) {
+                                                Surface(
+                                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                                    shape = CircleShape
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.PlayArrow,
+                                                            contentDescription = null,
+                                                            tint = MaterialTheme.colorScheme.primary,
+                                                            modifier = Modifier.size(10.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.width(4.dp))
+                                                        Text(
+                                                            text = "CURRENTLY PLAYING",
+                                                            fontSize = 8.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = MaterialTheme.colorScheme.primary
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
                                         Spacer(modifier = Modifier.height(4.dp))
                                         Text(
                                             text = videoTitle,
@@ -1368,7 +1490,8 @@ fun MainAppContent(
 
                                         Spacer(modifier = Modifier.height(16.dp))
 
-                                        if (isAnalyzingVideo && qualities.isEmpty()) {
+                                        if (activeTab == "video") {
+                                            if (isAnalyzingVideo && qualities.isEmpty()) {
                                             Row(
                                                 modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
@@ -1417,77 +1540,7 @@ fun MainAppContent(
                                                     fontSize = 13.sp
                                                 )
                                             }
-                                        } else if (qualities.size == 1) {
-                                            // SINGLE QUALITY VIDEOS
-                                            val option = qualities.first()
-                                            Column(modifier = Modifier.fillMaxWidth()) {
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    modifier = Modifier.padding(bottom = 12.dp)
-                                                ) {
-                                                    Text(
-                                                        text = "Estimated Size:",
-                                                        fontSize = 13.sp,
-                                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                                    )
-                                                    Spacer(modifier = Modifier.width(6.dp))
-                                                    Text(
-                                                        text = option.displaySize,
-                                                        fontSize = 14.sp,
-                                                        fontWeight = FontWeight.Bold,
-                                                        color = MaterialTheme.colorScheme.onSurface
-                                                    )
-                                                    if (option.format.isNotEmpty()) {
-                                                        Spacer(modifier = Modifier.width(8.dp))
-                                                        Surface(
-                                                            color = MaterialTheme.colorScheme.primaryContainer,
-                                                            shape = RoundedCornerShape(4.dp)
-                                                        ) {
-                                                            Text(
-                                                                text = option.format.uppercase(),
-                                                                fontSize = 9.sp,
-                                                                fontWeight = FontWeight.Bold,
-                                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                                                            )
-                                                        }
-                                                    }
-                                                }
-
-                                                Button(
-                                                    onClick = {
-                                                        com.example.util.VideoAnalyzer.startDirectDownload(
-                                                            context = context,
-                                                            url = option.url,
-                                                            title = videoTitle,
-                                                            resolution = option.resolution,
-                                                            estimatedSize = option.sizeBytes,
-                                                            downloadRepository = downloadRepository,
-                                                            scope = coroutineScope
-                                                        )
-                                                        showDetectedResourcesSheet = false
-                                                    },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    colors = ButtonDefaults.buttonColors(
-                                                        containerColor = MaterialTheme.colorScheme.primary
-                                                    ),
-                                                    shape = RoundedCornerShape(12.dp)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Download,
-                                                        contentDescription = null,
-                                                        modifier = Modifier.size(18.dp)
-                                                    )
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    Text(
-                                                        text = "Download (${option.displaySize})",
-                                                        fontWeight = FontWeight.Bold,
-                                                        fontSize = 14.sp
-                                                    )
-                                                }
-                                            }
                                         } else {
-                                            // MULTI QUALITY VIDEOS
                                             Text(
                                                 text = "AVAILABLE QUALITIES",
                                                 fontSize = 10.sp,
@@ -1502,26 +1555,64 @@ fun MainAppContent(
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 qualities.forEach { option ->
+                                                    val badgeText = when {
+                                                        option.resolution.lowercase().contains("2160") || option.resolution.lowercase().contains("4k") -> "4K UHD"
+                                                        option.resolution.lowercase().contains("1440") || option.resolution.lowercase().contains("2k") -> "2K QHD"
+                                                        option.resolution.lowercase().contains("1080") -> "1080p FHD"
+                                                        option.resolution.lowercase().contains("720") -> "720p HD"
+                                                        else -> "SD"
+                                                    }
+                                                    
+                                                    val badgeBgColor = when {
+                                                        option.resolution.lowercase().contains("2160") || option.resolution.lowercase().contains("4k") -> Color(0xFFFFB100).copy(alpha = 0.15f)
+                                                        option.resolution.lowercase().contains("1440") || option.resolution.lowercase().contains("2k") -> Color(0xFF00B1FF).copy(alpha = 0.15f)
+                                                        option.resolution.lowercase().contains("1080") -> Color(0xFF6200EE).copy(alpha = 0.15f)
+                                                        option.resolution.lowercase().contains("720") -> Color(0xFF4CAF50).copy(alpha = 0.15f)
+                                                        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                                                    }
+                                                    
+                                                    val badgeTextColor = when {
+                                                        option.resolution.lowercase().contains("2160") || option.resolution.lowercase().contains("4k") -> Color(0xFFFFB100)
+                                                        option.resolution.lowercase().contains("1440") || option.resolution.lowercase().contains("2k") -> Color(0xFF00B1FF)
+                                                        option.resolution.lowercase().contains("1080") -> Color(0xFFBB86FC)
+                                                        option.resolution.lowercase().contains("720") -> Color(0xFF81C784)
+                                                        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                                    }
+                                                    
+                                                    val audioIcon = if (option.hasAudio) Icons.Default.VolumeUp else Icons.Default.VolumeOff
+                                                    val audioTintColor = if (option.hasAudio) Color(0xFF4CAF50) else Color(0xFFE91E63)
+                                                    val audioDescription = if (option.hasAudio) "With Audio" else "Video Only"
+
+                                                    val qualityInteractionSource = remember { MutableInteractionSource() }
+                                                    val isQualityFocused by qualityInteractionSource.collectIsFocusedAsState()
+                                                    val qualityScale by animateFloatAsState(targetValue = if (isQualityFocused) 1.02f else 1f, label = "qualityScale")
+
                                                     Surface(
                                                         modifier = Modifier
                                                             .fillMaxWidth()
-                                                            .clickable {
-                                                                com.example.util.VideoAnalyzer.startDirectDownload(
-                                                                    context = context,
-                                                                    url = option.url,
-                                                                    title = videoTitle,
-                                                                    resolution = option.resolution,
-                                                                    estimatedSize = option.sizeBytes,
-                                                                    downloadRepository = downloadRepository,
-                                                                    scope = coroutineScope
-                                                                )
-                                                                showDetectedResourcesSheet = false
-                                                            },
-                                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                                            .scale(qualityScale)
+                                                            .focusable(interactionSource = qualityInteractionSource)
+                                                            .clickable(
+                                                                interactionSource = qualityInteractionSource,
+                                                                indication = androidx.compose.foundation.LocalIndication.current,
+                                                                onClick = {
+                                                                    com.example.util.VideoAnalyzer.startDirectDownload(
+                                                                        context = context,
+                                                                        url = option.url,
+                                                                        title = videoTitle,
+                                                                        resolution = option.resolution,
+                                                                        estimatedSize = option.sizeBytes,
+                                                                        downloadRepository = downloadRepository,
+                                                                        scope = coroutineScope
+                                                                    )
+                                                                    showDetectedResourcesSheet = false
+                                                                }
+                                                            ),
+                                                        color = if (isQualityFocused) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
                                                         shape = RoundedCornerShape(12.dp),
                                                         border = BorderStroke(
-                                                            width = 1.dp,
-                                                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.1f)
+                                                            width = if (isQualityFocused) 2.5.dp else 1.dp,
+                                                            color = if (isQualityFocused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.1f)
                                                         )
                                                     ) {
                                                         Row(
@@ -1532,35 +1623,224 @@ fun MainAppContent(
                                                         ) {
                                                             Icon(
                                                                 imageVector = Icons.Default.Download,
-                                                                contentDescription = null,
+                                                                contentDescription = "Download stream",
                                                                 tint = MaterialTheme.colorScheme.primary,
-                                                                modifier = Modifier.size(16.dp)
+                                                                modifier = Modifier.size(18.dp)
                                                             )
-                                                            Spacer(modifier = Modifier.width(12.dp))
-                                                            Text(
-                                                                text = option.resolution,
-                                                                fontSize = 14.sp,
-                                                                fontWeight = FontWeight.Bold,
-                                                                color = MaterialTheme.colorScheme.onSurface
-                                                            )
-                                                            Spacer(modifier = Modifier.width(6.dp))
-                                                            Text(
-                                                                text = "•  ${option.displaySize}",
-                                                                fontSize = 13.sp,
-                                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                                            )
-                                                            Spacer(modifier = Modifier.weight(1f))
+                                                            Spacer(modifier = Modifier.width(10.dp))
+                                                            Column(modifier = Modifier.weight(1f)) {
+                                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                                    Text(
+                                                                        text = option.resolution,
+                                                                        fontSize = 15.sp,
+                                                                        fontWeight = FontWeight.Bold,
+                                                                        color = MaterialTheme.colorScheme.onSurface
+                                                                    )
+                                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                                    Surface(
+                                                                        color = badgeBgColor,
+                                                                        shape = RoundedCornerShape(4.dp)
+                                                                    ) {
+                                                                        Text(
+                                                                            text = badgeText,
+                                                                            fontSize = 9.sp,
+                                                                            fontWeight = FontWeight.Bold,
+                                                                            color = badgeTextColor,
+                                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                        )
+                                                                    }
+                                                                }
+                                                                Spacer(modifier = Modifier.height(2.dp))
+                                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                                    Text(
+                                                                        text = option.displaySize,
+                                                                        fontSize = 12.sp,
+                                                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                                                    )
+                                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                                    Text(
+                                                                        text = "•",
+                                                                        fontSize = 12.sp,
+                                                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                                                                    )
+                                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                                    Icon(
+                                                                        imageVector = audioIcon,
+                                                                        contentDescription = audioDescription,
+                                                                        tint = audioTintColor,
+                                                                        modifier = Modifier.size(12.dp)
+                                                                    )
+                                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                                    Text(
+                                                                        text = audioDescription,
+                                                                        fontSize = 11.sp,
+                                                                        color = audioTintColor
+                                                                    )
+                                                                }
+                                                            }
+                                                            
                                                             Surface(
                                                                 color = MaterialTheme.colorScheme.secondaryContainer,
-                                                                shape = RoundedCornerShape(4.dp)
+                                                                shape = RoundedCornerShape(6.dp)
                                                             ) {
                                                                 Text(
                                                                     text = option.format.uppercase(),
                                                                     fontSize = 9.sp,
                                                                     fontWeight = FontWeight.Bold,
                                                                     color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
                                                                 )
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        } else {
+                                            val audioQualities = analyzedAudioQualities[videoTitle] ?: emptyList()
+                                            if (isAnalyzingAudio && audioQualities.isEmpty()) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.Center
+                                                ) {
+                                                    CircularProgressIndicator(
+                                                        modifier = Modifier.size(20.dp),
+                                                        strokeWidth = 2.dp,
+                                                        color = MaterialTheme.colorScheme.error
+                                                    )
+                                                    Spacer(modifier = Modifier.width(12.dp))
+                                                    Text(
+                                                        text = "Extracting audio streams...",
+                                                        fontSize = 13.sp,
+                                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                                    )
+                                                }
+                                            } else if (audioQualities.isEmpty()) {
+                                                Text(
+                                                    text = "No compatible audio streams detected.",
+                                                    color = MaterialTheme.colorScheme.error,
+                                                    fontSize = 13.sp
+                                                )
+                                            } else {
+                                                Text(
+                                                    text = "AVAILABLE AUDIO FORMATS",
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                                                    letterSpacing = 1.2.sp,
+                                                    modifier = Modifier.padding(bottom = 8.dp)
+                                                )
+                                                
+                                                Column(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                                ) {
+                                                    audioQualities.forEach { option ->
+                                                        val formatColor = when (option.format.uppercase()) {
+                                                            "MP3" -> Color(0xFFD32F2F)
+                                                            "M4A", "AAC" -> Color(0xFF1976D2)
+                                                            "OPUS" -> Color(0xFF00796B)
+                                                            "FLAC", "WAV" -> Color(0xFF388E3C)
+                                                            else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                                        }
+
+                                                        val audioOptionInteractionSource = remember { MutableInteractionSource() }
+                                                        val isAudioOptionFocused by audioOptionInteractionSource.collectIsFocusedAsState()
+                                                        val audioOptionScale by animateFloatAsState(targetValue = if (isAudioOptionFocused) 1.02f else 1f, label = "audioScale")
+
+                                                        Surface(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .scale(audioOptionScale)
+                                                                .focusable(interactionSource = audioOptionInteractionSource)
+                                                                .clickable(
+                                                                    interactionSource = audioOptionInteractionSource,
+                                                                    indication = androidx.compose.foundation.LocalIndication.current,
+                                                                    onClick = {
+                                                                        com.example.util.VideoAnalyzer.startDirectDownloadAudio(
+                                                                            context = context,
+                                                                            url = option.url,
+                                                                            title = videoTitle,
+                                                                            bitrate = option.bitrate,
+                                                                            format = option.format,
+                                                                            estimatedSize = option.sizeBytes,
+                                                                            downloadRepository = downloadRepository,
+                                                                            scope = coroutineScope
+                                                                        )
+                                                                        showDetectedResourcesSheet = false
+                                                                    }
+                                                                ),
+                                                            color = if (isAudioOptionFocused) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                                            shape = RoundedCornerShape(12.dp),
+                                                            border = BorderStroke(
+                                                                width = if (isAudioOptionFocused) 2.5.dp else 1.dp,
+                                                                color = if (isAudioOptionFocused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.1f)
+                                                            )
+                                                        ) {
+                                                            Row(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                                                verticalAlignment = Alignment.CenterVertically
+                                                            ) {
+                                                                Icon(
+                                                                    imageVector = Icons.Default.MusicNote,
+                                                                    contentDescription = "Download audio",
+                                                                    tint = formatColor,
+                                                                    modifier = Modifier.size(18.dp)
+                                                                )
+                                                                Spacer(modifier = Modifier.width(10.dp))
+                                                                Column(modifier = Modifier.weight(1f)) {
+                                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                                        Text(
+                                                                            text = option.format,
+                                                                            fontSize = 15.sp,
+                                                                            fontWeight = FontWeight.Bold,
+                                                                            color = MaterialTheme.colorScheme.onSurface
+                                                                        )
+                                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                                        Surface(
+                                                                            color = formatColor.copy(alpha = 0.15f),
+                                                                            shape = RoundedCornerShape(4.dp)
+                                                                        ) {
+                                                                            Text(
+                                                                                text = option.bitrate,
+                                                                                fontSize = 9.sp,
+                                                                                fontWeight = FontWeight.Bold,
+                                                                                color = formatColor,
+                                                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                            )
+                                                                        }
+                                                                        if (!option.codec.isNullOrEmpty()) {
+                                                                            Spacer(modifier = Modifier.width(6.dp))
+                                                                            Text(
+                                                                                text = "•  ${option.codec}",
+                                                                                fontSize = 9.sp,
+                                                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                                                                            )
+                                                                        }
+                                                                    }
+                                                                    Spacer(modifier = Modifier.height(2.dp))
+                                                                    Text(
+                                                                        text = option.displaySize,
+                                                                        fontSize = 12.sp,
+                                                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                                                    )
+                                                                }
+                                                                
+                                                                Surface(
+                                                                    color = MaterialTheme.colorScheme.errorContainer,
+                                                                    shape = RoundedCornerShape(6.dp)
+                                                                ) {
+                                                                    Text(
+                                                                        text = "AUDIO",
+                                                                        fontSize = 8.sp,
+                                                                        fontWeight = FontWeight.Bold,
+                                                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                                                                    )
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -1751,7 +2031,7 @@ fun MainAppContent(
 
                         Text(
                             text = "Auto-closing in ${telegramCountdown}s...",
-                            color = CinemaGold,
+                            color = YellowGoldCustom,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -1988,7 +2268,7 @@ fun BrowserToolbar(
                 lowercaseUrl.contains("wikipedia.org") -> if (isDarkTheme) Color(0xFF1E1E1E) else Color(0xFFF6F6F6)
                 lowercaseUrl.contains("github.com") -> Color(0xFF1F2328)
                 else -> {
-                    if (isDarkTheme) Color(0xFF08080A) else Color.White
+                    if (isDarkTheme) Color(0xFF0D1117) else Color.White
                 }
             }
         }
@@ -2297,35 +2577,31 @@ fun BrowserToolbar(
             }
         }
 
-        if (isEditing) {
-                val suggestions by viewModel.searchSuggestions.collectAsStateWithLifecycle()
-                if (suggestions.isNotEmpty()) {
-                    var lastFilledText by remember { mutableStateOf("") }
-                    SearchSuggestionsDropdown(
-                        suggestions = suggestions,
-                        isDarkTheme = isDarkTheme,
-                        onSuggestionClick = { item ->
-                            if (editUrlText.trim().lowercase() == item.text.trim().lowercase() || item.text.trim().lowercase() == lastFilledText.trim().lowercase()) {
-                                onUrlSubmit(item.text)
-                                focusManager.clearFocus()
-                            } else {
-                                editUrlText = item.text
-                                lastFilledText = item.text
-                                viewModel.updateSearchInput(item.text)
-                            }
-                        },
-                        onDeleteSearchClick = { item ->
-                            viewModel.deleteSearchQuery(item.id)
-                        },
-                        onClearAllClick = {
-                            viewModel.clearSearchQueryHistory()
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
-                }
-            }
+        val suggestions by viewModel.searchSuggestions.collectAsStateWithLifecycle()
+        AnimatedVisibility(
+            visible = isEditing && suggestions.isNotEmpty(),
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            SearchSuggestionsDropdown(
+                suggestions = suggestions,
+                isDarkTheme = isDarkTheme,
+                onSuggestionClick = { item ->
+                    editUrlText = item.text
+                    onUrlSubmit(item.text)
+                    focusManager.clearFocus()
+                },
+                onDeleteSearchClick = { item ->
+                    viewModel.deleteSearchQuery(item.id)
+                },
+                onClearAllClick = {
+                    viewModel.clearSearchQueryHistory()
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            )
+        }
         }
     }
 }
@@ -2340,11 +2616,11 @@ fun TabGridOverlay(
     onNewTab: () -> Unit,
     onCloseGrid: () -> Unit
 ) {
-    val backdropColor = if (isDarkTheme) Color(0xFF08080A) else Color(0xFFFAFAFC)
+    val backdropColor = if (isDarkTheme) Color(0xFF0D1117) else Color(0xFFFFFFFF)
     val textColor = if (isDarkTheme) Color.White else Color(0xFF131317)
     val cardActiveBorder = if (isDarkTheme) CinemaGold else CinemaRed
     val cardBorder = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
-    val metadataBg = if (isDarkTheme) Color(0xFF121217) else Color.White
+    val metadataBg = if (isDarkTheme) Color(0xFF1F2937) else Color.White
     val subTextColor = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368)
 
     Surface(
@@ -2411,8 +2687,8 @@ fun TabGridOverlay(
                 ) {
                     gridItems(tabs, key = { it.id }) { tab ->
                         val isActive = tab.id == selectedTabId
-                        val activeContainerColor = if (isDarkTheme) Color(0xFF121217) else Color.White
-                        val inactiveContainerColor = if (isDarkTheme) Color(0xFF08080A) else Color(0xFFF1F3F4)
+                        val activeContainerColor = if (isDarkTheme) Color(0xFF1F2937) else Color.White
+                        val inactiveContainerColor = if (isDarkTheme) Color(0xFF0D1117) else Color(0xFFF1F3F4)
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -3056,7 +3332,7 @@ fun MyAccountTab(
                                 Icon(
                                     imageVector = if (isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
                                     contentDescription = "Toggle Theme Mode",
-                                    tint = if (isDarkTheme) CinemaGold else CinemaRed,
+                                    tint = CinemaRed,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -3075,7 +3351,7 @@ fun MyAccountTab(
                                 Icon(
                                     imageVector = Icons.Default.Language,
                                     contentDescription = "Open google.com",
-                                    tint = if (isDarkTheme) CinemaGold else CinemaRed,
+                                    tint = YellowGoldCustom,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -3119,16 +3395,16 @@ fun MyAccountTab(
                                     Icon(
                                         imageVector = Icons.Default.ContentPaste,
                                         contentDescription = "Paste from Clipboard",
-                                        tint = CinemaGold
+                                        tint = YellowGoldCustom
                                     )
                                 }
                             },
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
                                 unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f),
-                                focusedBorderColor = CinemaGold,
+                                focusedBorderColor = YellowGoldCustom,
                                 unfocusedBorderColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
-                                focusedLabelColor = CinemaGold,
+                                focusedLabelColor = YellowGoldCustom,
                                 unfocusedLabelColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                                 focusedTextColor = MaterialTheme.colorScheme.onSurface,
                                 unfocusedTextColor = MaterialTheme.colorScheme.onSurface
@@ -3150,7 +3426,7 @@ fun MyAccountTab(
                                 .testTag("paste_go_button"),
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = CinemaGold,
+                                containerColor = YellowGoldCustom,
                                 contentColor = Color.Black
                             )
                         ) {
@@ -3187,7 +3463,7 @@ fun MyAccountTab(
                     .testTag("portal_download_manager_card"),
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.2.dp, CinemaGold.copy(alpha = 0.5f))
+                border = BorderStroke(1.2.dp, YellowGoldCustom.copy(alpha = 0.5f))
             ) {
                 Row(
                     modifier = Modifier
@@ -3199,13 +3475,13 @@ fun MyAccountTab(
                         modifier = Modifier
                             .size(46.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(CinemaGold.copy(alpha = 0.15f)),
+                            .background(YellowGoldCustom.copy(alpha = 0.15f)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.Download,
                             contentDescription = "Download Manager",
-                            tint = CinemaGold,
+                            tint = YellowGoldCustom,
                             modifier = Modifier.size(26.dp)
                         )
                     }
@@ -4205,7 +4481,7 @@ fun HelpInstructionsTab(onNavigateToMirror: (String) -> Unit) {
                     )
                     
                     Text(
-                        text = "Version 2.0.0",
+                        text = "Version " + AppVersionInfo.getVersionName(context),
                         color = CinemaGold,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold
@@ -4531,6 +4807,9 @@ data class CategoryItem(
 
 @Composable
 fun SplashScreen(isDarkTheme: Boolean) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val versionName = remember { AppVersionInfo.getVersionName(context) }
+    
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -4578,6 +4857,17 @@ fun SplashScreen(isDarkTheme: Boolean) {
                 fontWeight = FontWeight.Medium
             )
         }
+
+        Text(
+            text = "Version $versionName",
+            color = (if (isDarkTheme) Color.LightGray else Color.DarkGray).copy(alpha = 0.5f),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.5.sp,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 36.dp)
+        )
     }
 }
 
@@ -4658,7 +4948,7 @@ fun BrowserActionMenuPopup(
                     .padding(top = 52.dp, end = 12.dp)
                     .clickable(enabled = false, onClick = {}),
                 shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = if (isDarkTheme) Color(0xFF121217) else Color.White),
+                colors = CardDefaults.cardColors(containerColor = if (isDarkTheme) Color(0xFF1F2937) else Color.White),
                 elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
                 border = BorderStroke(0.5.dp, if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFE0E0E0))
             ) {
@@ -4739,24 +5029,49 @@ fun BrowserActionMenuPopup(
                             )
                         }
 
-                        // Download Button
+                        // Animated Premium Theme Toggle Button
+                        val iconScale by animateFloatAsState(
+                            targetValue = if (isDarkTheme) 1.0f else 0.9f,
+                            animationSpec = androidx.compose.animation.core.tween(durationMillis = 300),
+                            label = "ScaleAnimation"
+                        )
+                        val iconAlpha by animateFloatAsState(
+                            targetValue = if (isDarkTheme) 1.0f else 0.85f,
+                            animationSpec = androidx.compose.animation.core.tween(durationMillis = 300),
+                            label = "AlphaAnimation"
+                        )
+
                         Box(
                             modifier = Modifier
                                 .size(40.dp)
                                 .clip(CircleShape)
-                                .background(iconBg)
+                                .background(
+                                    if (isDarkTheme) Color(0xFF1F2937).copy(alpha = 0.75f)
+                                    else Color(0xFFF1F3F4).copy(alpha = 0.85f)
+                                )
                                 .clickable {
-                                    onDismiss()
-                                    onDownloadClick()
+                                    onToggleDarkTheme()
                                 },
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Download,
-                                contentDescription = "Downloads",
-                                tint = if (isDarkTheme) Color(0xFFE6E1E5) else Color(0xFF5F6368),
-                                modifier = Modifier.size(18.dp)
-                            )
+                            Crossfade(
+                                targetState = isDarkTheme,
+                                animationSpec = androidx.compose.animation.core.tween(durationMillis = 300),
+                                label = "ThemeIconCrossfade"
+                            ) { darkState ->
+                                Icon(
+                                    imageVector = if (darkState) Icons.Default.DarkMode else Icons.Default.LightMode,
+                                    contentDescription = if (darkState) "Switch to Light Mode" else "Switch to Dark Mode",
+                                    tint = Color(0xFFD0BCFF), // Unified Brand Accent (Premium Lavender D0BCFF)
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .graphicsLayer(
+                                            scaleX = iconScale,
+                                            scaleY = iconScale,
+                                            alpha = iconAlpha
+                                        )
+                                )
+                            }
                         }
 
                         // Reload Button
@@ -4929,16 +5244,16 @@ fun BrowserHistoryBookmarksDialog(
     var subTabState by remember { mutableStateOf(0) } // 0 = Bookmarks, 1 = History
     var searchQuery by remember { mutableStateOf("") }
 
-    val bgColor = if (isDarkTheme) Color(0xFF08080A) else Color(0xFFFAFAFC)
+    val bgColor = if (isDarkTheme) Color(0xFF0D1117) else Color(0xFFFFFFFF)
     val headerTextColor = if (isDarkTheme) Color.White else Color(0xFF131317)
-    val closeBtnBg = if (isDarkTheme) Color(0xFF121217) else Color(0xFFF1F3F4)
+    val closeBtnBg = if (isDarkTheme) Color(0xFF161B22) else Color(0xFFF1F3F4)
     val closeBtnTint = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368)
-    val tabsBg = if (isDarkTheme) Color(0xFF121217) else Color(0xFFF1F3F4)
-    val tabActiveBg = if (isDarkTheme) Color(0xFF1F1F24) else Color.White
-    val tabActiveText = if (isDarkTheme) CinemaGold else Color(0xFF1A73E8)
+    val tabsBg = if (isDarkTheme) Color(0xFF161B22) else Color(0xFFF1F3F4)
+    val tabActiveBg = if (isDarkTheme) Color(0xFF1F2937) else Color.White
+    val tabActiveText = Color(0xFFD0BCFF)
     val tabInactiveText = if (isDarkTheme) Color.Gray else Color(0xFF5F6368)
-    val itemCardBg = if (isDarkTheme) Color(0xFF121217) else Color.White
-    val itemBorderColor = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
+    val itemCardBg = if (isDarkTheme) Color(0xFF1F2937) else Color.White
+    val itemBorderColor = if (isDarkTheme) Color(0xFF1F2937) else Color(0xFFE0E0E0)
     val titleTextColor = if (isDarkTheme) Color.White else Color(0xFF131317)
     val subtitleTextColor = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368)
 
@@ -5192,8 +5507,8 @@ fun BrowserHistoryBookmarksDialog(
                     .height(48.dp)
                     .testTag("bookmarks_history_exit_button"),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isDarkTheme) CinemaGold else CinemaRed,
-                    contentColor = if (isDarkTheme) Color.Black else Color.White
+                    containerColor = CinemaRed,
+                    contentColor = Color.Black
                 ),
                 shape = RoundedCornerShape(24.dp),
                 elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
@@ -5205,7 +5520,7 @@ fun BrowserHistoryBookmarksDialog(
                     Icon(
                         imageVector = Icons.Default.Home,
                         contentDescription = null,
-                        tint = if (isDarkTheme) Color.Black else Color.White,
+                        tint = Color.Black,
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
@@ -5213,7 +5528,7 @@ fun BrowserHistoryBookmarksDialog(
                         text = "Exit & Back to Home",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (isDarkTheme) Color.Black else Color.White
+                        color = Color.Black
                     )
                 }
             }
@@ -5246,7 +5561,7 @@ fun BrowserHomepage(
         Box(
             modifier = modifier
                 .fillMaxSize()
-                .background(if (isDark) Color(0xFF08080A) else Color(0xFFFAFAFC)),
+                .background(if (isDark) Color(0xFF0D1117) else Color(0xFFFFFFFF)),
             contentAlignment = Alignment.Center
         ) {
             Column(
@@ -5258,14 +5573,14 @@ fun BrowserHomepage(
                     modifier = Modifier
                         .size(110.dp)
                         .clip(RoundedCornerShape(28.dp))
-                        .background(if (isDark) Color(0xFF121217) else Color.White)
+                        .background(if (isDark) Color(0xFF161B22) else Color.White)
                         .padding(18.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.Language,
                         contentDescription = "Able Browser Logo",
-                        tint = if (isDark) CinemaGold else CinemaRed,
+                        tint = YellowGoldCustom,
                         modifier = Modifier.size(74.dp)
                     )
                 }
@@ -5273,7 +5588,7 @@ fun BrowserHomepage(
                 Spacer(modifier = Modifier.height(24.dp))
                 
                 CircularProgressIndicator(
-                    color = if (isDark) CinemaGold else CinemaRed,
+                    color = YellowGoldCustom,
                     strokeWidth = 3.dp,
                     modifier = Modifier.size(24.dp)
                 )
@@ -5293,24 +5608,31 @@ fun BrowserHomepage(
         Column(
             modifier = modifier
                 .fillMaxSize()
-                .background(if (isDark) Color(0xFF08080A) else Color(0xFFFAFAFC))
-                .padding(24.dp),
+                .background(if (isDark) Color(0xFF0D1117) else Color(0xFFFFFFFF)),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 640.dp)
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
             // App Logo/Icon
             Box(
                 modifier = Modifier
                     .size(80.dp)
                     .clip(RoundedCornerShape(20.dp))
-                    .background(if (isDark) Color(0xFF121217) else Color.White)
+                    .background(if (isDark) Color(0xFF161B22) else Color.White)
                     .padding(14.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.Language,
                     contentDescription = "Browser Logo",
-                    tint = if (isDark) CinemaGold else CinemaRed,
+                    tint = YellowGoldCustom,
                     modifier = Modifier.size(52.dp)
                 )
             }
@@ -5355,7 +5677,7 @@ fun BrowserHomepage(
                         .testTag("homepage_center_search_bar"),
                     shape = RoundedCornerShape(27.dp),
                     colors = CardDefaults.cardColors(
-                        containerColor = if (isDark) Color(0xFF121217) else Color.White
+                        containerColor = if (isDark) Color(0xFF1F2937) else Color.White
                     ),
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                     border = BorderStroke(
@@ -5447,20 +5769,18 @@ fun BrowserHomepage(
                     }
                 }
 
-                if (isSearchFocused && suggestions.isNotEmpty()) {
-                    var lastFilledText by remember { mutableStateOf("") }
+                AnimatedVisibility(
+                    visible = isSearchFocused && suggestions.isNotEmpty(),
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
                     SearchSuggestionsDropdown(
                         suggestions = suggestions,
                         isDarkTheme = isDark,
                         onSuggestionClick = { item ->
-                            if (searchText.trim().lowercase() == item.text.trim().lowercase() || item.text.trim().lowercase() == lastFilledText.trim().lowercase()) {
-                                viewModel.loadUrl(item.text)
-                                homeFocusManager.clearFocus()
-                            } else {
-                                searchText = item.text
-                                lastFilledText = item.text
-                                viewModel.updateSearchInput(item.text)
-                            }
+                            searchText = item.text
+                            viewModel.loadUrl(item.text)
+                            homeFocusManager.clearFocus()
                         },
                         onDeleteSearchClick = { item ->
                             viewModel.deleteSearchQuery(item.id)
@@ -5515,7 +5835,7 @@ fun BrowserHomepage(
                                 } else {
                                     Modifier.background(
                                         if (item.label == "Facebook") Color(0xFF1877F2)
-                                        else if (isDark) Color(0xFF121217)
+                                        else if (isDark) Color(0xFF1F2937)
                                         else Color.White
                                     )
                                 }
@@ -5611,7 +5931,7 @@ fun BrowserHomepage(
                     .clickable { onHistoryClick() },
                 shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (isDark) Color(0xFF121217) else Color.White
+                    containerColor = if (isDark) Color(0xFF1F2937) else Color.White
                 ),
                 elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
                 border = BorderStroke(
@@ -5648,7 +5968,7 @@ fun BrowserHomepage(
                     .clickable { onDownloadsClick() },
                 shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (isDark) Color(0xFF121217) else Color.White
+                    containerColor = if (isDark) Color(0xFF1F2937) else Color.White
                 ),
                 elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
                 border = BorderStroke(
@@ -5687,8 +6007,8 @@ fun BrowserHomepage(
                 .height(48.dp)
                 .testTag("exit_and_back_to_home_button"),
             colors = ButtonDefaults.buttonColors(
-                containerColor = if (isDark) CinemaGold else CinemaRed,
-                contentColor = if (isDark) Color.Black else Color.White
+                containerColor = CinemaRed,
+                contentColor = Color.Black
             ),
             shape = RoundedCornerShape(24.dp),
             elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
@@ -5700,7 +6020,7 @@ fun BrowserHomepage(
                 Icon(
                     imageVector = Icons.Default.Home,
                     contentDescription = null,
-                    tint = if (isDark) Color.Black else Color.White,
+                    tint = Color.Black,
                     modifier = Modifier.size(20.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
@@ -5708,10 +6028,11 @@ fun BrowserHomepage(
                     text = "Exit & Back to Home",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
-                    color = if (isDark) Color.Black else Color.White
+                    color = Color.Black
                 )
             }
         }
+        } // closes nested centering column
     } // closes Column
 } // closes else block
 }
@@ -5738,12 +6059,12 @@ fun AboutBrowserDialog(
                 .padding(16.dp),
             shape = RoundedCornerShape(24.dp),
             colors = CardDefaults.cardColors(
-                containerColor = if (isDarkTheme) Color(0xFF121217) else Color.White
+                containerColor = if (isDarkTheme) Color(0xFF1F2937) else Color.White
             ),
             elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
             border = BorderStroke(
                 width = 1.dp,
-                color = if (isDarkTheme) Color(0xFF1F1F28) else Color.LightGray.copy(alpha = 0.4f)
+                color = if (isDarkTheme) Color(0xFF1F2937) else Color.LightGray.copy(alpha = 0.4f)
             )
         ) {
             Column(
@@ -5757,14 +6078,14 @@ fun AboutBrowserDialog(
                     modifier = Modifier
                         .size(100.dp)
                         .clip(RoundedCornerShape(24.dp))
-                        .background(if (isDarkTheme) Color(0xFF08080A) else Color(0xFFF1F3F4))
+                        .background(if (isDarkTheme) Color(0xFF0D1117) else Color(0xFFF1F3F4))
                         .padding(18.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.Language,
                         contentDescription = "Able Browser Logo",
-                        tint = if (isDarkTheme) CinemaGold else CinemaRed,
+                        tint = YellowGoldCustom,
                         modifier = Modifier.size(64.dp)
                     )
                 }
@@ -5779,8 +6100,10 @@ fun AboutBrowserDialog(
                     textAlign = TextAlign.Center
                 )
 
+                val dialogContext = androidx.compose.ui.platform.LocalContext.current
+                val currentVer = AppVersionInfo.getVersionName(dialogContext)
                 Text(
-                    text = "Companion Secure Client v2.4.0",
+                    text = "Companion Secure Client v$currentVer",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = if (isDarkTheme) CinemaGold else CinemaRed,
@@ -5814,7 +6137,7 @@ fun AboutBrowserDialog(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .background(
-                                    color = if (isDarkTheme) Color(0xFF08080A) else Color(0xFFF1F3F4),
+                                    color = if (isDarkTheme) Color(0xFF0D1117) else Color(0xFFF1F3F4),
                                     shape = RoundedCornerShape(12.dp)
                                 )
                                 .padding(12.dp),
@@ -5892,7 +6215,7 @@ fun SearchSuggestionsDropdown(
             .testTag("search_suggestions_panel"),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isDarkTheme) Color(0xFF121217) else Color.White
+            containerColor = if (isDarkTheme) Color(0xFF1F2937) else Color.White
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
         border = BorderStroke(
@@ -5915,7 +6238,7 @@ fun SearchSuggestionsDropdown(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { onSuggestionClick(item) }
-                            .padding(horizontal = 16.dp, vertical = 11.dp)
+                            .padding(horizontal = 16.dp, vertical = 13.dp)
                             .testTag("suggestion_item_${index}"),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
