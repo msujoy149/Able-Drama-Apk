@@ -44,7 +44,7 @@ object VideoAnalyzer {
 
     // Format file size nicely
     fun formatFileSize(size: Long): String {
-        if (size <= 0) return "Unknown size"
+        if (size <= 0) return "Size Unknown"
         if (size < 1024) return "$size B"
         val exp = (Math.log(size.toDouble()) / Math.log(1024.0)).toInt()
         val units = arrayOf("KB", "MB", "GB", "TB")
@@ -189,12 +189,7 @@ object VideoAnalyzer {
                     }
                     
                     val res = currentResolution ?: "720p"
-                    val dur = if (durationSeconds > 0.0 && !durationSeconds.isNaN() && !durationSeconds.isInfinite()) durationSeconds else 300.0
-                    val sizeBytes = if (currentBandwidth > 0L) {
-                        (currentBandwidth * dur / 8.0).toLong()
-                    } else {
-                        calculateEstimatedSize(res, dur, "HLS")
-                    }
+                    val sizeBytes = 0L // HLS manifest streams are dynamic; actual size is unknown
                     
                     options.add(
                         VideoQualityOption(
@@ -256,71 +251,192 @@ object VideoAnalyzer {
         return calculateEstimatedSize(resolution, durationSeconds, "mp4")
     }
 
+    fun isMultiStreamPlatform(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("googlevideo.com") ||
+               lower.contains("youtube.com") ||
+               lower.contains("youtu.be") ||
+               lower.contains("facebook.com") ||
+               lower.contains("fb.watch") ||
+               lower.contains("fbcdn.net") ||
+               lower.contains("tiktok.com") ||
+               lower.contains("tiktokv.com") ||
+               lower.contains("instagram.com") ||
+               lower.contains("twitter.com") ||
+               lower.contains("x.com") ||
+               lower.contains("twimg.com") ||
+               lower.contains("bilibili.com") ||
+               lower.contains("dailymotion.com") ||
+               lower.contains("vimeo.com") ||
+               lower.contains(".any-adaptive-streaming")
+    }
+
+    private fun getYouTubeVideoUrl(videoUrl: String, itag: String, mime: String = "video/mp4"): String {
+        val uri = try { android.net.Uri.parse(videoUrl) } catch (e: Exception) { null } ?: return videoUrl
+        val builder = uri.buildUpon()
+        builder.clearQuery()
+        for (name in uri.queryParameterNames) {
+            when (name) {
+                "itag" -> builder.appendQueryParameter("itag", itag)
+                "mime" -> builder.appendQueryParameter("mime", mime)
+                "range", "rn", "index" -> { /* skip */ }
+                else -> {
+                    for (value in uri.getQueryParameters(name)) {
+                        builder.appendQueryParameter(name, value)
+                    }
+                }
+            }
+        }
+        if (uri.getQueryParameter("itag") == null) {
+            builder.appendQueryParameter("itag", itag)
+        }
+        if (uri.getQueryParameter("mime") == null) {
+            builder.appendQueryParameter("mime", mime)
+        }
+        return builder.build().toString()
+    }
+
     // High level video analyzer entry point
     suspend fun analyze(resourcesInGroup: List<DetectedResource>, durationSeconds: Double): List<VideoQualityOption> {
         val options = mutableListOf<VideoQualityOption>()
-        
-        // Find if we have any HLS streams
+        val firstRes = resourcesInGroup.firstOrNull() ?: return emptyList()
+        val urlLower = firstRes.url.lowercase()
+
+        // 1. YOUTUBE SPECIAL TREATMENT
+        val isYouTube = urlLower.contains("googlevideo.com") || urlLower.contains("youtube.com") || urlLower.contains("youtu.be")
+        if (isYouTube) {
+            val standardResolutions = listOf(
+                Triple("1080p FHD", "137", false),
+                Triple("720p HD", "22", true),      // Muxed
+                Triple("720p HD (Adapt)", "136", false), // Adaptive
+                Triple("480p SD", "135", false),
+                Triple("360p SD", "18", true),      // Muxed
+                Triple("360p SD (Adapt)", "134", false), // Adaptive
+                Triple("240p SD", "133", false),
+                Triple("144p SD", "160", false)
+            )
+            
+            val generatedOptions = mutableListOf<VideoQualityOption>()
+            
+            // Add actual captured YouTube resources first to preserve direct playbacks
+            for (res in resourcesInGroup) {
+                val label = extractResolutionLabel(res.quality ?: "", res.url)
+                val cleanLabel = if (label.isNotBlank() && !label.lowercase().contains("video stream") && !label.lowercase().contains("original")) label else "720p"
+                
+                val actualSize = if (res.fileSize > 0) res.fileSize else getStreamSize(res.url)
+                val finalSize = if (actualSize > 0) actualSize else calculateEstimatedSize(cleanLabel, durationSeconds, "mp4")
+                val displaySize = formatFileSize(finalSize)
+                
+                generatedOptions.add(
+                    VideoQualityOption(
+                        url = res.url,
+                        resolution = "$cleanLabel (Playing)",
+                        sizeBytes = finalSize,
+                        displaySize = displaySize,
+                        format = if (res.url.contains(".webm")) "webm" else "mp4",
+                        isHls = false,
+                        hasAudio = hasAudioFromItag(res.url)
+                    )
+                )
+            }
+            
+            // Add generated common resolutions
+            for ((resLabel, itag, hasAudio) in standardResolutions) {
+                val generatedUrl = getYouTubeVideoUrl(firstRes.url, itag)
+                val pureRes = resLabel.substringBefore(" ")
+                val estimatedSize = calculateEstimatedSize(pureRes, durationSeconds, "mp4")
+                
+                generatedOptions.add(
+                    VideoQualityOption(
+                        url = generatedUrl,
+                        resolution = resLabel,
+                        sizeBytes = estimatedSize,
+                        displaySize = formatFileSize(estimatedSize),
+                        format = "mp4",
+                        isHls = false,
+                        hasAudio = hasAudio
+                    )
+                )
+            }
+            
+            // Deduplicate items by resolution and sort by priority
+            return generatedOptions
+                .distinctBy { it.resolution }
+                .sortedWith(compareByDescending { getResolutionPriority(it.resolution) })
+        }
+
+        // 2. HLS STREAM DETECTION (.m3u8 master playlists)
         val hlsResource = resourcesInGroup.find { it.url.contains(".m3u8") || it.quality?.lowercase()?.contains("hls") == true }
         if (hlsResource != null) {
             val hlsOptions = parseHlsManifest(hlsResource.url, durationSeconds)
             if (hlsOptions.isNotEmpty()) {
-                // Deduplicate and filter broken/dead HLS streams
-                return hlsOptions
+                val finalHlsOptions = hlsOptions.map { opt ->
+                    val pureRes = opt.resolution.substringBefore(" ")
+                    val estimatedSize = calculateEstimatedSize(pureRes, durationSeconds, "mp4")
+                    opt.copy(
+                        sizeBytes = estimatedSize,
+                        displaySize = formatFileSize(estimatedSize)
+                    )
+                }
+                return finalHlsOptions
                     .distinctBy { it.resolution }
                     .sortedWith(compareByDescending { getResolutionPriority(it.resolution) })
             }
         }
 
-        // For non-HLS streams (including YouTube, Facebook, Tiktok, Dailymotion, direct MP4, etc.)
-        // We find the highest resolution label from the resources in group, or default to 1080p
-        var maxResStr = "1080p"
-        val firstRes = resourcesInGroup.firstOrNull()
-        if (firstRes != null) {
-            val q = firstRes.quality ?: "720p"
-            maxResStr = extractResolutionLabel(q, firstRes.url)
-            if (maxResStr.lowercase().contains("video stream") || maxResStr.lowercase().contains("hls")) {
-                maxResStr = "1080p" // fallback
-            }
-        }
+        // 3. OTHER MULTI-STREAM AND SINGLE VIDEO EXTRACTION
+        val isMultiPlatform = isMultiStreamPlatform(firstRes.url)
         
-        // Look through all resources in the group to find the highest resolution
-        var highestPriority = getResolutionPriority(maxResStr)
-        for (res in resourcesInGroup) {
-            val q = res.quality ?: "720p"
-            val r = extractResolutionLabel(q, res.url)
-            val p = getResolutionPriority(r)
-            if (p > highestPriority && p > 0) {
-                highestPriority = p
-                maxResStr = r
+        for (res in resourcesInGroup.distinctBy { it.url }) {
+            var resLabel = extractResolutionLabel(res.quality ?: "", res.url)
+            if (resLabel.isBlank() || resLabel.lowercase().contains("video stream") || resLabel.lowercase().contains("hls") || resLabel.lowercase().contains("original")) {
+                resLabel = "Direct Video"
             }
-        }
-
-        // Get the list of standard resolutions up to the maximum resolution of this video
-        val standardResolutions = listOf("2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p")
-        val maxResPriority = getResolutionPriority(maxResStr)
-        val availableResolutions = standardResolutions.filter { getResolutionPriority(it) <= maxResPriority }
-
-        val formatStr = if (firstRes?.url?.contains(".webm") == true) "webm" else "mp4"
-        val baseTargetUrl = firstRes?.url ?: ""
-        
-        for (resolution in availableResolutions) {
-            val sizeBytes = calculateEstimatedSize(resolution, durationSeconds, formatStr)
+            
+            val formatStr = when {
+                res.url.contains(".webm") || res.quality?.lowercase()?.contains("webm") == true -> "webm"
+                res.url.contains(".mkv") || res.quality?.lowercase()?.contains("mkv") == true -> "mkv"
+                else -> "mp4"
+            }
+            
+            val actualSize = if (res.fileSize > 0) res.fileSize else getStreamSize(res.url)
+            val finalSize = if (actualSize > 0) actualSize else calculateEstimatedSize(resLabel, durationSeconds, formatStr)
+            val displaySizeStr = formatFileSize(finalSize)
+            
             options.add(
                 VideoQualityOption(
-                    url = baseTargetUrl,
-                    resolution = resolution,
-                    sizeBytes = sizeBytes,
-                    displaySize = formatFileSize(sizeBytes),
+                    url = res.url,
+                    resolution = resLabel,
+                    sizeBytes = finalSize,
+                    displaySize = displaySizeStr,
                     format = formatStr,
                     isHls = false,
-                    hasAudio = true // All generated options support consolidated audio
+                    hasAudio = true
                 )
             )
         }
-
-        return options.distinctBy { it.resolution }
+        
+        // Sorting and Deduplication
+        val uniqueOptions = options.distinctBy { it.resolution }
             .sortedWith(compareByDescending { getResolutionPriority(it.resolution) })
+        
+        if (uniqueOptions.isEmpty()) {
+            val actualSize = if (firstRes.fileSize > 0) firstRes.fileSize else getStreamSize(firstRes.url)
+            val finalSize = if (actualSize > 0) actualSize else calculateEstimatedSize("720p", durationSeconds, "mp4")
+            return listOf(
+                VideoQualityOption(
+                    url = firstRes.url,
+                    resolution = "Direct Video",
+                    sizeBytes = finalSize,
+                    displaySize = formatFileSize(finalSize),
+                    format = if (firstRes.url.contains(".webm")) "webm" else "mp4",
+                    isHls = false,
+                    hasAudio = true
+                )
+            )
+        }
+        
+        return uniqueOptions
     }
 
     fun getResolutionFromItag(url: String): String? {
@@ -452,16 +568,43 @@ object VideoAnalyzer {
 
         val q = qualityStr.lowercase()
         val urlLower = url.lowercase()
+        
+        // 1. Search for width/height pattern (e.g., 1280x720 or 720x1280 or 1920x1080)
+        val dimensionRegex = "(\\d{3,4})[x_](\\d{3,4})".toRegex()
+        val match = dimensionRegex.find(urlLower)
+        if (match != null) {
+            val w = match.groupValues[1].toInt()
+            val h = match.groupValues[2].toInt()
+            val minDim = minOf(w, h)
+            if (minDim in 100..4320) {
+                return "${minDim}p"
+            }
+        }
+        
+        // 2. Search for explicit "720p", "1080p", etc. in URL
+        val pRegex = "(\\d{3,4})p".toRegex()
+        val pMatch = pRegex.find(urlLower)
+        if (pMatch != null) {
+            val h = pMatch.groupValues[1].toInt()
+            if (h in 100..4320) {
+                return "${h}p"
+            }
+        }
+
         return when {
             q.contains("4k") || q.contains("2160") || urlLower.contains("2160p") || urlLower.contains("2160") -> "2160p"
             q.contains("1440") || urlLower.contains("1440p") || urlLower.contains("1440") -> "1440p"
-            q.contains("1080") || urlLower.contains("1080p") || urlLower.contains("1080") -> "1080p"
-            q.contains("720") || urlLower.contains("720p") || urlLower.contains("720") -> "720p"
-            q.contains("480") || urlLower.contains("480p") || urlLower.contains("480") -> "480p"
+            q.contains("1080") || urlLower.contains("1080p") || urlLower.contains("1080") || urlLower.contains("hd_1080") -> "1080p"
+            q.contains("720") || urlLower.contains("720p") || urlLower.contains("720") || urlLower.contains("hd_720") || urlLower.contains("_hd") -> "720p"
+            q.contains("480") || urlLower.contains("480p") || urlLower.contains("480") || urlLower.contains("sd_480") || urlLower.contains("_sd") -> "480p"
             q.contains("360") || urlLower.contains("360p") || urlLower.contains("360") -> "360p"
             q.contains("240") || urlLower.contains("240p") || urlLower.contains("240") -> "240p"
             q.contains("144") || urlLower.contains("144p") || urlLower.contains("144") -> "144p"
-            else -> qualityStr
+            else -> {
+                if (qualityStr.isNotBlank() && !qualityStr.contains("video stream", ignoreCase = true) && !qualityStr.contains("hls", ignoreCase = true)) {
+                    qualityStr
+                } else "720p" // Safe modern default
+            }
         }
     }
 

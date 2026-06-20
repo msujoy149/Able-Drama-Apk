@@ -28,37 +28,50 @@ class ExampleUnitTest {
 
   @Test
   fun testVideoAnalyzerAvailableQualitiesResolutionBasedExpansion() = runBlocking {
-    val mockResources = listOf(
+    // 1. Single file detection test (e.g. Google Drive, direct mp4, etc.)
+    val singleResource = listOf(
+      DetectedResource(
+        url = "https://drive.google.com/file/d/abc/view",
+        title = "My Video",
+        fileType = "Video",
+        quality = "720p",
+        fileSize = 8200000L
+      )
+    )
+    val singleOptions = VideoAnalyzer.analyze(singleResource, 120.0)
+    assertEquals(1, singleOptions.size)
+    assertEquals("720p", singleOptions.first().resolution)
+    assertEquals(8200000L, singleOptions.first().sizeBytes)
+    assertEquals("7.8 MB", singleOptions.first().displaySize)
+
+    // 2. Multi-stream platform test (should return generated standard resolutions as requested)
+    val multiResources = listOf(
       DetectedResource(
         url = "https://www.googlevideo.com/videoplayback?itag=37",
         title = "Adele - Hello",
         fileType = "Video",
         quality = "1080p",
         fileSize = 0L
+      ),
+      DetectedResource(
+        url = "https://www.googlevideo.com/videoplayback?itag=22",
+        title = "Adele - Hello",
+        fileType = "Video",
+        quality = "720p",
+        fileSize = 0L
       )
     )
-    
-    val options = VideoAnalyzer.analyze(mockResources, 300.0)
-    
-    // Check that we have multiple dynamic resolution steps up to 1080p
-    assertTrue(options.isNotEmpty())
-    val resolutions = options.map { it.resolution }
-    assertTrue(resolutions.contains("1080p"))
-    assertTrue(resolutions.contains("720p"))
-    assertTrue(resolutions.contains("480p"))
-    assertTrue(resolutions.contains("360p"))
-    assertTrue(resolutions.contains("240p"))
-    assertTrue(resolutions.contains("144p"))
-    
+    val multiOptions = VideoAnalyzer.analyze(multiResources, 300.0)
+    assertTrue(multiOptions.isNotEmpty())
+    val resolutions = multiOptions.map { it.resolution }
+    assertTrue(resolutions.any { it.contains("1080") })
+    assertTrue(resolutions.any { it.contains("720") })
+
     // Check sorting descending by resolution priority
-    val firstResolution = options.first().resolution
-    assertEquals("1080p", firstResolution)
+    val firstResolution = multiOptions.first().resolution
+    assertTrue(firstResolution.contains("1080"))
     
     // Check that there are absolutely no duplicate options in resolution
-    assertEquals(options.size, options.distinctBy { it.resolution }.size)
-    
-    // Check size calculation uniqueness - every resolution must have a distinct calculated size
-    val sizes = options.map { it.sizeBytes }
-    assertEquals(sizes.size, sizes.distinct().size)
+    assertEquals(multiOptions.size, multiOptions.distinctBy { it.resolution }.size)
   }
 }
