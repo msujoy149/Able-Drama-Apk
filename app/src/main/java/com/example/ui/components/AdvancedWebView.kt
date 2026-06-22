@@ -35,7 +35,36 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.pointerInput
+import kotlinx.coroutines.delay
 import com.example.ui.BrowserViewModel
 import com.example.ui.WebViewCommand
 import com.example.ui.DetectedResource
@@ -48,6 +77,7 @@ fun AdvancedWebView(
     tabId: String,
     isVisible: Boolean = true,
     isDarkTheme: Boolean = false,
+    isDramaWebview: Boolean = false,
     isDesktopModeAllowed: Boolean = false,
     modifier: Modifier = Modifier,
     onShowCustomView: (android.view.View, WebChromeClient.CustomViewCallback) -> Unit = { _, _ -> },
@@ -83,6 +113,7 @@ fun AdvancedWebView(
             
             isFocusable = true
             isFocusableInTouchMode = true
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
             
             // WebViews in hybrid apps should have third-party cookie support enabled
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
@@ -145,8 +176,8 @@ fun AdvancedWebView(
         prevDesktopMode = isDesktopCurrentlyActive
     }
 
-    LaunchedEffect(webView, isDarkTheme) {
-        applyBrowserLevelDarkTheme(webView, isDarkTheme)
+    LaunchedEffect(webView, isDarkTheme, isDramaWebview) {
+        applyBrowserLevelDarkTheme(webView, isDarkTheme, isDramaWebview)
     }
 
     // Clean up older webViews safely to prevent leaking native rendering contexts and memory
@@ -318,7 +349,7 @@ fun AdvancedWebView(
             viewModel.updateLoadingStatus(tabId, true, 10)
             viewModel.updateWebThemeColor(tabId, null)
             if (view != null) {
-                applyBrowserLevelDarkTheme(view, isDarkTheme)
+                applyBrowserLevelDarkTheme(view, isDarkTheme, isDramaWebview)
             }
         }
 
@@ -368,7 +399,7 @@ fun AdvancedWebView(
                     extractPageResources(view, tabId, viewModel)
                 }, 3000)
                 
-                applyBrowserLevelDarkTheme(view, isDarkTheme)
+                applyBrowserLevelDarkTheme(view, isDarkTheme, isDramaWebview)
                 val adHideJs = "(function() {\n" +
                         "  var style = document.createElement('style');\n" +
                         "  style.type = 'text/css';\n" +
@@ -457,7 +488,7 @@ fun AdvancedWebView(
             super.onProgressChanged(view, newProgress)
             viewModel.updateLoadingStatus(tabId, newProgress < 100, newProgress)
             if (view != null && newProgress >= 15) {
-                applyBrowserLevelDarkTheme(view, isDarkTheme)
+                applyBrowserLevelDarkTheme(view, isDarkTheme, isDramaWebview)
             }
         }
 
@@ -557,15 +588,39 @@ fun AdvancedWebView(
         }
     }
 
+    val dramaTabsVal by viewModel.dramaTabs.collectAsState()
+    val browserTabsVal by viewModel.browserTabs.collectAsState()
+    val thisTab = remember(dramaTabsVal, browserTabsVal, tabId) {
+        dramaTabsVal.find { it.id == tabId } ?: browserTabsVal.find { it.id == tabId }
+    }
+    val tabIsLoading = thisTab?.isLoading ?: false
+    val tabProgress = thisTab?.progress ?: 0
+
     // Embed WebView into Jetpack Compose layout tree with key-controlled recreation
-    key(webViewVersion) {
-        AndroidView(
-            factory = { webView },
-            modifier = modifier.fillMaxSize(),
-            update = { view ->
-                view.visibility = if (isVisible) android.view.View.VISIBLE else android.view.View.GONE
-            }
-        )
+    Box(modifier = modifier.fillMaxSize()) {
+        key(webViewVersion) {
+            AndroidView(
+                factory = { webView },
+                modifier = Modifier.fillMaxSize(),
+                update = { view ->
+                    view.visibility = if (isVisible) android.view.View.VISIBLE else android.view.View.GONE
+                }
+            )
+        }
+
+        // Show a discrete, modern, red linear progress line at the very top of each loading webview
+        if (tabIsLoading && isVisible) {
+            LinearProgressIndicator(
+                progress = { tabProgress / 100f },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .height(3.dp)
+                    .testTag("web_load_progress"),
+                color = Color.Red,
+                trackColor = Color.Transparent
+            )
+        }
     }
 }
 
@@ -598,25 +653,182 @@ private fun captureWebViewThumbnail(webView: WebView, tabId: String, viewModel: 
     }
 }
 
-internal fun applyBrowserLevelDarkTheme(webView: WebView, isDarkTheme: Boolean) {
+internal fun applyBrowserLevelDarkTheme(webView: WebView, isDarkTheme: Boolean, isDramaWebview: Boolean) {
+    if (isDramaWebview) {
+        // App's Internal Able Drama Section: absolute safety: NOT forced
+        try {
+            val settings = webView.settings
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                settings.isAlgorithmicDarkeningAllowed = false
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                @Suppress("DEPRECATION")
+                settings.forceDark = WebSettings.FORCE_DARK_OFF
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        val js = "(function() {\n" +
+                "  var style = document.getElementById('able-dark-theme-style');\n" +
+                "  if (style) { style.parentNode.removeChild(style); }\n" +
+                "  document.documentElement.removeAttribute('data-theme');\n" +
+                "  document.documentElement.removeAttribute('data-color-mode');\n" +
+                "  document.documentElement.removeAttribute('theme');\n" +
+                "  document.documentElement.removeAttribute('color-scheme');\n" +
+                "})()"
+        webView.evaluateJavascript(js, null)
+        return
+    }
+
+    // 1. WebView algorithmic force dark (acts as ultimate failsafe rendering for sites without native styles)
     try {
         val settings = webView.settings
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            settings.setAlgorithmicDarkeningAllowed(false)
+            settings.isAlgorithmicDarkeningAllowed = isDarkTheme
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-            settings.setForceDark(WebSettings.FORCE_DARK_OFF)
+            @Suppress("DEPRECATION")
+            settings.forceDark = if (isDarkTheme) WebSettings.FORCE_DARK_ON else WebSettings.FORCE_DARK_OFF
         }
     } catch (e: Exception) {
         e.printStackTrace()
     }
 
-    // Completely remove the injected styles to prevent any website content/color inversion or overriding
-    val js = "(function() {\n" +
-            "  var style = document.getElementById('able-dark-theme-style');\n" +
-            "  if (style) { style.parentNode.removeChild(style); }\n" +
-            "})()"
-    webView.evaluateJavascript(js, null)
+    // 2. JavaScript / Cookie / LocalStorage Synchronization injector for instant response (no refresh)
+    val syncJs = """
+        (function() {
+            var isDark = $isDarkTheme;
+            var themeStr = isDark ? 'dark' : 'light';
+            
+            // A. prefers-color-scheme media query synchronization
+            try {
+                if (!window.__originalMatchMedia) {
+                    window.__originalMatchMedia = window.matchMedia;
+                }
+                window.matchMedia = function(query) {
+                    if (query && query.indexOf('prefers-color-scheme') !== -1) {
+                        return {
+                            matches: isDark ? query.indexOf('dark') !== -1 : query.indexOf('light') !== -1,
+                            media: query,
+                            onchange: null,
+                            addListener: function() {},
+                            removeListener: function() {},
+                            addEventListener: function() {},
+                            removeEventListener: function() {}
+                        };
+                    }
+                    return window.__originalMatchMedia.apply(this, arguments);
+                };
+                window.dispatchEvent(new Event('change'));
+            } catch (e) {}
+
+            // B. Set general cookies for color schema preference
+            try {
+                var expiry = "; max-age=31536000; path=/";
+                document.cookie = "theme=" + themeStr + expiry;
+                document.cookie = "color-scheme=" + themeStr + expiry;
+                document.cookie = "color_scheme=" + themeStr + expiry;
+                document.cookie = "darkMode=" + (isDark ? "true" : "false") + expiry;
+                
+                // Specific cookie syncs
+                var host = window.location.hostname;
+                if (host.indexOf('youtube.com') !== -1) {
+                    var match = document.cookie.match(/PREF=([^;]+)/);
+                    var prefVal = match ? match[1] : "";
+                    if (isDark) {
+                        if (prefVal.indexOf('f6=') === -1) {
+                            prefVal += (prefVal ? "&" : "") + "f6=400";
+                        } else {
+                            prefVal = prefVal.replace(/f6=[^&]+/g, 'f6=400');
+                        }
+                    } else {
+                        prefVal = prefVal.replace(/f6=[^&]+/g, 'f6=4');
+                    }
+                    try {
+                        document.cookie = "PREF=" + prefVal + "; domain=.youtube.com; path=/; max-age=31536000; Secure; SameSite=None";
+                    } catch (err) {
+                        document.cookie = "PREF=" + prefVal + "; domain=.youtube.com; path=/; max-age=31536000";
+                    }
+                }
+            } catch (e) {}
+
+            // C. Sync Local Storage & Session Storage values
+            try {
+                localStorage.setItem('theme', themeStr);
+                localStorage.setItem('theme-mode', themeStr);
+                localStorage.setItem('themeMode', themeStr);
+                localStorage.setItem('color-scheme', themeStr);
+                localStorage.setItem('colorMode', themeStr);
+                localStorage.setItem('darkMode', isDark ? 'true' : 'false');
+            } catch (e) {}
+
+            // D. Class/Attribute Sync - triggers native dark stylesheet selectors instantly on supported platforms
+            try {
+                var doc = document.documentElement;
+                if (doc) {
+                    doc.setAttribute('data-theme', themeStr);
+                    doc.setAttribute('data-color-mode', themeStr);
+                    doc.setAttribute('theme', themeStr);
+                    doc.setAttribute('color-scheme', themeStr);
+                    
+                    var host = window.location.hostname;
+                    if (host.indexOf('github.com') !== -1) {
+                        doc.setAttribute('data-color-mode', isDark ? 'dark' : 'light');
+                        doc.setAttribute('data-dark-theme', 'dark');
+                        doc.setAttribute('data-light-theme', 'light');
+                    } else if (host.indexOf('reddit.com') !== -1) {
+                        doc.setAttribute('color-scheme', themeStr);
+                    } else if (host.indexOf('youtube.com') !== -1) {
+                        doc.setAttribute('theme', isDark ? 'dark' : 'light');
+                    }
+                    
+                    if (isDark) {
+                        doc.classList.add('dark-mode', 'dark-theme', 'theme-dark');
+                        doc.classList.remove('light-mode', 'light-theme', 'theme-light');
+                    } else {
+                        doc.classList.add('light-mode', 'light-theme', 'theme-light');
+                        doc.classList.remove('dark-mode', 'dark-theme', 'theme-dark');
+                    }
+                }
+                
+                var body = document.body;
+                if (body) {
+                    body.setAttribute('data-theme', themeStr);
+                    body.setAttribute('theme', themeStr);
+                    if (isDark) {
+                        body.classList.add('dark-mode', 'dark-theme', 'theme-dark');
+                        body.classList.remove('light-mode', 'light-theme', 'theme-light');
+                    } else {
+                        body.classList.add('light-mode', 'light-theme', 'theme-light');
+                        body.classList.remove('dark-mode', 'dark-theme', 'theme-dark');
+                    }
+                }
+            } catch (e) {}
+
+            // E. Dynamic style injection as premium fallback to prevent background light flashing
+            try {
+                var existingStyle = document.getElementById('able-dark-theme-style');
+                if (existingStyle) {
+                    existingStyle.parentNode.removeChild(existingStyle);
+                }
+                if (isDark) {
+                    var style = document.createElement('style');
+                    style.type = 'text/css';
+                    style.id = 'able-dark-theme-style';
+                    style.innerHTML = 'html, body { background-color: #121212 !important; color: #E0E0E0 !important; }';
+                    document.head.appendChild(style);
+                }
+            } catch (e) {}
+
+            // F. Notify JS-heavy single page apps (React, Next, Vue)
+            try {
+                window.dispatchEvent(new Event('themechange'));
+                window.dispatchEvent(new Event('change'));
+            } catch (e) {}
+        })();
+    """.trimIndent()
+
+    webView.evaluateJavascript(syncJs, null)
 }
 
 fun detectMediaType(url: String): DetectedResource? {

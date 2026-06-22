@@ -11,6 +11,18 @@ class BrowserApplication : Application() {
         super.onCreate()
         
         try {
+            // Configure WebView multi-process data directory suffix if needed
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                val currentProcess = getProcessName()
+                if (packageName != currentProcess) {
+                    android.webkit.WebView.setDataDirectorySuffix(currentProcess)
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("BrowserApplication", "Failed to set WebView data directory suffix", e)
+        }
+        
+        try {
             // Initialize Room database and DownloadRepository
             val database = AppDatabase.getDatabase(this)
             val repository = DownloadRepository(database.downloadDao())

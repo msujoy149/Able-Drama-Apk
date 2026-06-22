@@ -234,6 +234,10 @@ class BrowserViewModel(
         map[activeId] ?: false
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
+    // Tracks the current active video source url for each tab
+    private val _activeVideoSrcMap = MutableStateFlow<Map<String, String>>(emptyMap())
+    val activeVideoSrcMap: StateFlow<Map<String, String>> = _activeVideoSrcMap.asStateFlow()
+
     // Tracks the clean extracted video/page title for each tab
     private val _activeVideoTitleMap = MutableStateFlow<Map<String, String>>(emptyMap())
     val activeVideoTitleMap: StateFlow<Map<String, String>> = _activeVideoTitleMap.asStateFlow()
@@ -257,7 +261,8 @@ class BrowserViewModel(
         val activeTab = _browserTabs.value.find { it.id == activeId } ?: _dramaTabs.value.find { it.id == activeId }
         val pageUrl = activeTab?.url ?: currentUrl.value
         
-        if (pageUrl.isBlank() || pageUrl.startsWith("browser://") || pageUrl == "about:blank" || !isDownloadablePage(pageUrl)) {
+        val isDownloadable = isDownloadablePage(pageUrl) || isPlaying || videoResources.isNotEmpty()
+        if (pageUrl.isBlank() || pageUrl.startsWith("browser://") || pageUrl == "about:blank" || !isDownloadable) {
             return@combine emptyList<DetectedResource>()
         }
         
@@ -486,6 +491,18 @@ class BrowserViewModel(
         videoWidth: Int = 0,
         videoHeight: Int = 0
     ) {
+        if (isPlaying && activeSrc.isNotBlank()) {
+            val previousSrc = _activeVideoSrcMap.value[tabId] ?: ""
+            if (activeSrc != previousSrc) {
+                _activeVideoSrcMap.update { map ->
+                    map.toMutableMap().apply {
+                        put(tabId, activeSrc)
+                    }
+                }
+                clearDetectedResources(tabId)
+            }
+        }
+
         _isVideoPlayingMap.update { map ->
             map.toMutableMap().apply {
                 put(tabId, isPlaying)
@@ -501,7 +518,7 @@ class BrowserViewModel(
 
         val activeTab = _browserTabs.value.find { it.id == tabId } ?: _dramaTabs.value.find { it.id == tabId }
         val pageUrl = activeTab?.url ?: currentUrl.value
-        val isDownloadable = isDownloadablePage(pageUrl)
+        val isDownloadable = isDownloadablePage(pageUrl) || isPlaying
 
         val resolvedTitle = when {
             activeTitle.isNotBlank() && !isGenericTitle(activeTitle) -> activeTitle
@@ -813,6 +830,13 @@ class BrowserViewModel(
     }
 
     fun updateCurrentStateWithHistory(tabId: String, url: String, title: String, thumbnailUrl: String? = null) {
+        val previousTabUrl = _browserTabs.value.find { it.id == tabId }?.url 
+            ?: _dramaTabs.value.find { it.id == tabId }?.url 
+            ?: ""
+        if (previousTabUrl.isNotBlank() && url != previousTabUrl) {
+            clearDetectedResources(tabId)
+        }
+
         if (_dramaTabs.value.any { it.id == tabId }) {
             _dramaTabs.value = _dramaTabs.value.map { tab ->
                 if (tab.id == tabId) {

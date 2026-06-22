@@ -27,6 +27,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -125,6 +126,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         var isAbleDramaActive: Boolean = true
+        var lastCopiedValueToIgnore: String? = null
     }
 
     private var customView: View? = null
@@ -144,10 +146,10 @@ class MainActivity : ComponentActivity() {
 
         private val listener = ClipboardManager.OnPrimaryClipChangedListener {
             handler.removeCallbacks(checkClipboardRunnable)
-            handler.postDelayed(checkClipboardRunnable, 500)
+            handler.postDelayed(checkClipboardRunnable, 1000)
         }
 
-        fun triggerCheck(delayMs: Long = 500) {
+        fun triggerCheck(delayMs: Long = 1000) {
             handler.removeCallbacks(checkClipboardRunnable)
             if (delayMs > 0) {
                 handler.postDelayed(checkClipboardRunnable, delayMs)
@@ -186,6 +188,11 @@ class MainActivity : ComponentActivity() {
         }
 
         private fun checkClipboard() {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                // On Android Q and higher, automatic background/resume clipboard checking is restricted by the OS
+                // and generates system log warnings. We fallback to user-initiated manual paste buttons.
+                return
+            }
             if (!isResumed) return
             if (!activity.hasWindowFocus()) return
             if (!MainActivity.isAbleDramaActive) return
@@ -207,14 +214,21 @@ class MainActivity : ComponentActivity() {
                     }
                     val copiedText = firstItem?.text?.toString()?.trim()
                     if (!copiedText.isNullOrEmpty()) {
+                        val ignored = MainActivity.lastCopiedValueToIgnore
+                        if (ignored != null && (copiedText == ignored || copiedText.contains(ignored) || ignored.contains(copiedText))) {
+                            return
+                        }
                         val urlCandidate = activity.extractUrl(copiedText)
                         if (urlCandidate != null) {
+                            if (ignored != null && (urlCandidate == ignored || urlCandidate.contains(ignored) || ignored.contains(urlCandidate))) {
+                                return
+                            }
                             onClipboardChanged(urlCandidate)
                         }
                     }
                 }
             } catch (t: Throwable) {
-                android.util.Log.e("ClipboardObserver", "Error in clipboard check", t)
+                android.util.Log.w("ClipboardObserver", "Clipboard check bypassed due to focus context: " + t.localizedMessage)
             }
         }
     }
@@ -469,7 +483,7 @@ class MainActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
-            clipboardObserver?.triggerCheck(500)
+            clipboardObserver?.triggerCheck(1200)
         }
     }
 }
@@ -485,6 +499,7 @@ data class NavigationHistoryEntry(
     val showDownloadManagerDialog: Boolean = false,
     val showBrowserHistoryDialog: Boolean = false,
     val showAboutBrowserDialog: Boolean = false,
+    val showSocialHubDialog: Boolean = false,
     val isDramaModeActive: Boolean = true
 )
 
@@ -567,6 +582,7 @@ fun MainAppContent(
     var showBrowserHistoryDialog by remember { mutableStateOf(false) }
     var showAboutBrowserDialog by remember { mutableStateOf(false) }
     var showTelegramDialog by remember { mutableStateOf(false) }
+    var showSocialHubDialog by remember { mutableStateOf(false) }
     var showExitDialog by remember { mutableStateOf(false) }
     var showReturnToDramaDialog by remember { mutableStateOf(false) }
 
@@ -596,6 +612,7 @@ fun MainAppContent(
         showDownloadManagerDialog = false
         showBrowserHistoryDialog = false
         showAboutBrowserDialog = false
+        showSocialHubDialog = false
     }
 
     LaunchedEffect(viewModel) {
@@ -617,6 +634,7 @@ fun MainAppContent(
             showDownloadManagerDialog = showDownloadManagerDialog,
             showBrowserHistoryDialog = showBrowserHistoryDialog,
             showAboutBrowserDialog = showAboutBrowserDialog,
+            showSocialHubDialog = showSocialHubDialog,
             isDramaModeActive = viewModel.isDramaModeActive.value
         )
         val last = navHistory.lastOrNull()
@@ -658,6 +676,7 @@ fun MainAppContent(
             showDownloadManagerDialog = entry.showDownloadManagerDialog
             showBrowserHistoryDialog = entry.showBrowserHistoryDialog
             showAboutBrowserDialog = entry.showAboutBrowserDialog
+            showSocialHubDialog = entry.showSocialHubDialog
             return true
         }
         return false
@@ -686,6 +705,9 @@ fun MainAppContent(
             }
             showTelegramDialog -> {
                 showTelegramDialog = false
+            }
+            showSocialHubDialog -> {
+                showSocialHubDialog = false
             }
             currentTab == AppTab.BROWSER && !isDramaModeActive -> {
                 if (canGoBack) {
@@ -891,16 +913,6 @@ fun MainAppContent(
                     .background(MaterialTheme.colorScheme.background)
             ) {
                 Column(modifier = Modifier.fillMaxSize()) {
-                    // Progressive load line
-                    if (isLoading) {
-                        LinearProgressIndicator(
-                            progress = { loadProgress / 100f },
-                            modifier = Modifier.fillMaxWidth().height(4.dp).testTag("web_load_progress"),
-                            color = Color.Red,
-                            trackColor = Color.Transparent
-                        )
-                    }
-
                     // If internet goes offline, show interactive toast alert
                     if (!isOnline) {
                         OfflineAlertBanner()
@@ -992,6 +1004,7 @@ fun MainAppContent(
                                             tabId = tab.id,
                                             isVisible = isThisTabVisible,
                                             isDarkTheme = isDarkTheme,
+                                            isDramaWebview = true,
                                             onShowCustomView = onShowCustomView,
                                             onHideCustomView = onHideCustomView,
                                             modifier = Modifier.fillMaxSize().testTag("movie_web_view_${tab.id}"),
@@ -1046,6 +1059,9 @@ fun MainAppContent(
                                                     },
                                                     onExitClick = {
                                                         exitAndBackToHome()
+                                                    },
+                                                    onFolderClick = {
+                                                        showSocialHubDialog = true
                                                     },
                                                     modifier = Modifier.fillMaxSize()
                                                 )
@@ -1139,7 +1155,7 @@ fun MainAppContent(
 
                             // Floating Download Button on the right-middle side of the screen
                             androidx.compose.animation.AnimatedVisibility(
-                                visible = currentDetectedResources.isNotEmpty() && viewModel.isDownloadablePage(currentUrl),
+                                visible = currentDetectedResources.isNotEmpty(),
                                 enter = fadeIn(animationSpec = androidx.compose.animation.core.tween(200)) + scaleIn(animationSpec = androidx.compose.animation.core.tween(200)),
                                 exit = fadeOut(animationSpec = androidx.compose.animation.core.tween(200)) + scaleOut(animationSpec = androidx.compose.animation.core.tween(200)),
                                 modifier = Modifier
@@ -1882,6 +1898,10 @@ fun MainAppContent(
                 onExitClick = {
                     showDownloadManagerDialog = false
                     exitAndBackToHome()
+                },
+                onNavigateToUrl = { targetUrl ->
+                    showDownloadManagerDialog = false
+                    viewModel.loadUrl(targetUrl)
                 }
             )
         }
@@ -1962,6 +1982,17 @@ fun MainAppContent(
             AboutBrowserDialog(
                 isDarkTheme = isDarkTheme,
                 onDismissRequest = { showAboutBrowserDialog = false }
+            )
+        }
+
+        if (showSocialHubDialog) {
+            SocialHubDialog(
+                isDarkTheme = isDarkTheme,
+                onPlatformClick = { url ->
+                    showSocialHubDialog = false
+                    viewModel.loadUrl(url)
+                },
+                onDismissRequest = { showSocialHubDialog = false }
             )
         }
 
@@ -2268,7 +2299,7 @@ fun BrowserToolbar(
                 lowercaseUrl.contains("wikipedia.org") -> if (isDarkTheme) Color(0xFF1E1E1E) else Color(0xFFF6F6F6)
                 lowercaseUrl.contains("github.com") -> Color(0xFF1F2328)
                 else -> {
-                    if (isDarkTheme) Color(0xFF0D1117) else Color.White
+                    if (isDarkTheme) Color(0xFF12141C) else Color.White
                 }
             }
         }
@@ -2616,11 +2647,11 @@ fun TabGridOverlay(
     onNewTab: () -> Unit,
     onCloseGrid: () -> Unit
 ) {
-    val backdropColor = if (isDarkTheme) Color(0xFF0D1117) else Color(0xFFFFFFFF)
+    val backdropColor = if (isDarkTheme) Color(0xFF12141C) else Color(0xFFFFFFFF)
     val textColor = if (isDarkTheme) Color.White else Color(0xFF131317)
     val cardActiveBorder = if (isDarkTheme) CinemaGold else CinemaRed
-    val cardBorder = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
-    val metadataBg = if (isDarkTheme) Color(0xFF1F2937) else Color.White
+    val cardBorder = if (isDarkTheme) Color(0xFF2E3245) else Color(0xFFE0E0E0)
+    val metadataBg = if (isDarkTheme) Color(0xFF1E202B) else Color.White
     val subTextColor = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368)
 
     Surface(
@@ -2687,8 +2718,8 @@ fun TabGridOverlay(
                 ) {
                     gridItems(tabs, key = { it.id }) { tab ->
                         val isActive = tab.id == selectedTabId
-                        val activeContainerColor = if (isDarkTheme) Color(0xFF1F2937) else Color.White
-                        val inactiveContainerColor = if (isDarkTheme) Color(0xFF0D1117) else Color(0xFFF1F3F4)
+                        val activeContainerColor = if (isDarkTheme) Color(0xFF1E202B) else Color.White
+                        val inactiveContainerColor = if (isDarkTheme) Color(0xFF12141C) else Color(0xFFF1F3F4)
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -3490,7 +3521,7 @@ fun MyAccountTab(
                     
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Download Manager",
+                            text = "Downloads",
                             color = MaterialTheme.colorScheme.onSurface,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold
@@ -4948,9 +4979,9 @@ fun BrowserActionMenuPopup(
                     .padding(top = 52.dp, end = 12.dp)
                     .clickable(enabled = false, onClick = {}),
                 shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = if (isDarkTheme) Color(0xFF1F2937) else Color.White),
+                colors = CardDefaults.cardColors(containerColor = if (isDarkTheme) Color(0xFF1E202B) else Color.White),
                 elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                border = BorderStroke(0.5.dp, if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFE0E0E0))
+                border = BorderStroke(0.5.dp, if (isDarkTheme) Color(0xFF2E3245) else Color(0xFFE0E0E0))
             ) {
                 Column(
                     modifier = Modifier
@@ -4965,7 +4996,7 @@ fun BrowserActionMenuPopup(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val iconBg = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFF1F3F4)
+                        val iconBg = if (isDarkTheme) Color(0xFF2E3245) else Color(0xFFF1F3F4)
                         val iconTint = if (isDarkTheme) Color.White else Color(0xFF202124)
                         val iconDisabledTint = if (isDarkTheme) Color(0xFF49454F) else Color(0xFFC4C7C5)
 
@@ -5046,7 +5077,7 @@ fun BrowserActionMenuPopup(
                                 .size(40.dp)
                                 .clip(CircleShape)
                                 .background(
-                                    if (isDarkTheme) Color(0xFF1F2937).copy(alpha = 0.75f)
+                                    if (isDarkTheme) Color(0xFF1E202B).copy(alpha = 0.75f)
                                     else Color(0xFFF1F3F4).copy(alpha = 0.85f)
                                 )
                                 .clickable {
@@ -5095,7 +5126,7 @@ fun BrowserActionMenuPopup(
                         }
                     }
 
-                    val dividerColor = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
+                    val dividerColor = if (isDarkTheme) Color(0xFF2E3245) else Color(0xFFE0E0E0)
                     HorizontalDivider(color = dividerColor, thickness = 0.5.dp, modifier = Modifier.padding(vertical = 4.dp))
 
                     // Menu List Items
@@ -5244,16 +5275,16 @@ fun BrowserHistoryBookmarksDialog(
     var subTabState by remember { mutableStateOf(0) } // 0 = Bookmarks, 1 = History
     var searchQuery by remember { mutableStateOf("") }
 
-    val bgColor = if (isDarkTheme) Color(0xFF0D1117) else Color(0xFFFFFFFF)
+    val bgColor = if (isDarkTheme) Color(0xFF12141C) else Color(0xFFFFFFFF)
     val headerTextColor = if (isDarkTheme) Color.White else Color(0xFF131317)
-    val closeBtnBg = if (isDarkTheme) Color(0xFF161B22) else Color(0xFFF1F3F4)
+    val closeBtnBg = if (isDarkTheme) Color(0xFF1E202B) else Color(0xFFF1F3F4)
     val closeBtnTint = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368)
-    val tabsBg = if (isDarkTheme) Color(0xFF161B22) else Color(0xFFF1F3F4)
-    val tabActiveBg = if (isDarkTheme) Color(0xFF1F2937) else Color.White
+    val tabsBg = if (isDarkTheme) Color(0xFF1E202B) else Color(0xFFF1F3F4)
+    val tabActiveBg = if (isDarkTheme) Color(0xFF252733) else Color.White
     val tabActiveText = Color(0xFFD0BCFF)
     val tabInactiveText = if (isDarkTheme) Color.Gray else Color(0xFF5F6368)
-    val itemCardBg = if (isDarkTheme) Color(0xFF1F2937) else Color.White
-    val itemBorderColor = if (isDarkTheme) Color(0xFF1F2937) else Color(0xFFE0E0E0)
+    val itemCardBg = if (isDarkTheme) Color(0xFF1E202B) else Color.White
+    val itemBorderColor = if (isDarkTheme) Color(0xFF2E3245) else Color(0xFFE0E0E0)
     val titleTextColor = if (isDarkTheme) Color.White else Color(0xFF131317)
     val subtitleTextColor = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368)
 
@@ -5545,6 +5576,7 @@ fun BrowserHomepage(
     onDownloadsClick: () -> Unit,
     isDarkTheme: Boolean,
     onExitClick: () -> Unit,
+    onFolderClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val isDark = isDarkTheme
@@ -5561,7 +5593,7 @@ fun BrowserHomepage(
         Box(
             modifier = modifier
                 .fillMaxSize()
-                .background(if (isDark) Color(0xFF0D1117) else Color(0xFFFFFFFF)),
+                .background(if (isDark) Color(0xFF12141C) else Color(0xFFFFFFFF)),
             contentAlignment = Alignment.Center
         ) {
             Column(
@@ -5573,7 +5605,7 @@ fun BrowserHomepage(
                     modifier = Modifier
                         .size(110.dp)
                         .clip(RoundedCornerShape(28.dp))
-                        .background(if (isDark) Color(0xFF161B22) else Color.White)
+                        .background(if (isDark) Color(0xFF1E202B) else Color.White)
                         .padding(18.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -5608,7 +5640,7 @@ fun BrowserHomepage(
         Column(
             modifier = modifier
                 .fillMaxSize()
-                .background(if (isDark) Color(0xFF0D1117) else Color(0xFFFFFFFF)),
+                .background(if (isDark) Color(0xFF12141C) else Color(0xFFFFFFFF)),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
@@ -5625,7 +5657,7 @@ fun BrowserHomepage(
                 modifier = Modifier
                     .size(80.dp)
                     .clip(RoundedCornerShape(20.dp))
-                    .background(if (isDark) Color(0xFF161B22) else Color.White)
+                    .background(if (isDark) Color(0xFF1E202B) else Color.White)
                     .padding(14.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -5677,12 +5709,12 @@ fun BrowserHomepage(
                         .testTag("homepage_center_search_bar"),
                     shape = RoundedCornerShape(27.dp),
                     colors = CardDefaults.cardColors(
-                        containerColor = if (isDark) Color(0xFF1F2937) else Color.White
+                        containerColor = if (isDark) Color(0xFF1E202B) else Color.White
                     ),
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                     border = BorderStroke(
                         width = 1.dp,
-                        color = if (isDark) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
+                        color = if (isDark) Color(0xFF2E3245) else Color(0xFFE0E0E0)
                     )
                 ) {
                     Row(
@@ -5805,7 +5837,7 @@ fun BrowserHomepage(
             verticalAlignment = Alignment.CenterVertically
         ) {
             val shortcuts = listOf(
-                ShortcutItem("Google", "https://www.google.com", Icons.Default.Search, Color(0xFF4285F4)),
+                ShortcutItem("Folder", "", Icons.Default.Folder, Color(0xFF4285F4)),
                 ShortcutItem("YouTube", "https://www.youtube.com", Icons.Default.PlayArrow, Color(0xFFFF0000)),
                 ShortcutItem("Facebook", "https://www.facebook.com", Icons.Default.ThumbUp, Color(0xFF1877F2)),
                 ShortcutItem("AbleDrama", "https://www.abledrama.top", Icons.Default.Tv, if (isDark) CinemaGold else CinemaRed)
@@ -5816,7 +5848,11 @@ fun BrowserHomepage(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier
                         .clickable {
-                            viewModel.loadUrl(item.url)
+                            if (item.label == "Folder") {
+                                onFolderClick()
+                            } else {
+                                viewModel.loadUrl(item.url)
+                            }
                         }
                         .padding(8.dp)
                 ) {
@@ -5835,7 +5871,7 @@ fun BrowserHomepage(
                                 } else {
                                     Modifier.background(
                                         if (item.label == "Facebook") Color(0xFF1877F2)
-                                        else if (isDark) Color(0xFF1F2937)
+                                        else if (isDark) Color(0xFF1E202B)
                                         else Color.White
                                     )
                                 }
@@ -5843,13 +5879,94 @@ fun BrowserHomepage(
                             .border(
                                 width = 1.dp,
                                 color = if (item.label == "AbleDrama") Color(0xFF7F7F7F)
-                                        else if (isDark) Color(0xFF1F1F28)
+                                        else if (isDark) Color(0xFF2E3245)
                                         else Color.LightGray.copy(alpha = 0.3f),
                                 shape = itemShape
                             ),
                         contentAlignment = Alignment.Center
                     ) {
-                        if (item.label == "Facebook") {
+                        if (item.label == "Folder") {
+                            Column(
+                                modifier = Modifier.padding(4.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    // 1. YouTube
+                                    Box(
+                                        modifier = Modifier
+                                            .size(16.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFFFF0000)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.PlayArrow,
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(10.dp)
+                                        )
+                                    }
+                                    // 2. Facebook
+                                    Box(
+                                        modifier = Modifier
+                                            .size(16.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFF1877F2)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "f",
+                                            color = Color.White,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.offset(y = (-1).dp)
+                                        )
+                                    }
+                                }
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    // 3. TikTok
+                                    Box(
+                                        modifier = Modifier
+                                            .size(16.dp)
+                                            .clip(CircleShape)
+                                            .background(Color.Black),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.MusicNote,
+                                            contentDescription = null,
+                                            tint = Color(0xFF25F4EE),
+                                            modifier = Modifier.size(9.dp)
+                                        )
+                                    }
+                                    // 4. Instagram
+                                    Box(
+                                        modifier = Modifier
+                                            .size(16.dp)
+                                            .clip(CircleShape)
+                                            .background(
+                                                Brush.linearGradient(
+                                                    colors = listOf(Color(0xFF8134AF), Color(0xFFDD2A7B), Color(0xFFF58529))
+                                                )
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(8.dp)
+                                                .border(0.8.dp, Color.White, RoundedCornerShape(2.dp))
+                                        )
+                                    }
+                                }
+                            }
+                        } else if (item.label == "Facebook") {
                             Text(
                                 text = "f",
                                 color = Color.White,
@@ -5931,12 +6048,12 @@ fun BrowserHomepage(
                     .clickable { onHistoryClick() },
                 shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (isDark) Color(0xFF1F2937) else Color.White
+                    containerColor = if (isDark) Color(0xFF1E202B) else Color.White
                 ),
                 elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
                 border = BorderStroke(
                     width = 1.dp,
-                    color = if (isDark) Color(0xFF1F1F28) else Color.LightGray.copy(alpha = 0.3f)
+                    color = if (isDark) Color(0xFF2E3245) else Color.LightGray.copy(alpha = 0.3f)
                 )
             ) {
                 Row(
@@ -5968,12 +6085,12 @@ fun BrowserHomepage(
                     .clickable { onDownloadsClick() },
                 shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (isDark) Color(0xFF1F2937) else Color.White
+                    containerColor = if (isDark) Color(0xFF1E202B) else Color.White
                 ),
                 elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
                 border = BorderStroke(
                     width = 1.dp,
-                    color = if (isDark) Color(0xFF1F1F28) else Color.LightGray.copy(alpha = 0.3f)
+                    color = if (isDark) Color(0xFF2E3245) else Color.LightGray.copy(alpha = 0.3f)
                 )
             ) {
                 Row(
@@ -6037,6 +6154,348 @@ fun BrowserHomepage(
 } // closes else block
 }
 
+
+data class SocialHubPlatform(
+    val name: String,
+    val url: String,
+    val iconColor: Color,
+    val iconLetter: String = "",
+    val useGradient: Boolean = false,
+    val gradientColors: List<Color> = emptyList(),
+    val isCustomPlayIcon: Boolean = false,
+    val isCustomMusicIcon: Boolean = false,
+    val isCustomCameraIcon: Boolean = false,
+    val isCustomTwitterIcon: Boolean = false
+)
+
+@Composable
+fun SocialHubDialog(
+    isDarkTheme: Boolean,
+    onPlatformClick: (String) -> Unit,
+    onDismissRequest: () -> Unit
+) {
+    var searchQuery by remember { mutableStateOf("") }
+    
+    val brandPrimary = Color(0xFFD0BCFF)
+    val dialogBg = if (isDarkTheme) Color(0xFF12141C) else Color(0xFFFFFFFF)
+    val textColor = if (isDarkTheme) Color.White else Color(0xFF1C1B1F)
+    val secondaryTextColor = if (isDarkTheme) Color(0xFFCAD0DB) else Color(0xFF49454F)
+    val searchBg = if (isDarkTheme) Color(0xFF1F2232) else Color(0xFFEEEEF6)
+    val dividerColor = if (isDarkTheme) Color(0xFF2E3245) else Color(0xFFE1E2EC)
+
+    val socialPlatforms = remember {
+        listOf(
+            SocialHubPlatform("Google Search", "https://www.google.com", Color(0xFF4285F4), "G"),
+            SocialHubPlatform("YouTube", "https://www.youtube.com", Color(0xFFFF0000), "Y", isCustomPlayIcon = true),
+            SocialHubPlatform("Facebook", "https://www.facebook.com", Color(0xFF1877F2), "f"),
+            SocialHubPlatform("Instagram", "https://www.instagram.com", Color(0xFFE4405F), "I", useGradient = true, gradientColors = listOf(Color(0xFF8134AF), Color(0xFFDD2A7B), Color(0xFFF58529)), isCustomCameraIcon = true),
+            SocialHubPlatform("TikTok", "https://www.tiktok.com", Color(0xFF000000), "T", isCustomMusicIcon = true),
+            SocialHubPlatform("X (Twitter)", "https://www.x.com", Color(0xFF000000), "X", isCustomTwitterIcon = true),
+            SocialHubPlatform("Reddit", "https://www.reddit.com", Color(0xFFFF4500), "r"),
+            SocialHubPlatform("Pinterest", "https://www.pinterest.com", Color(0xFFBD081C), "P"),
+            SocialHubPlatform("Threads", "https://www.threads.net", Color(0xFF000000), "@"),
+            SocialHubPlatform("Telegram", "https://telegram.org", Color(0xFF0088CC), "tg"),
+            SocialHubPlatform("WhatsApp Web", "https://web.whatsapp.com", Color(0xFF25D366), "W"),
+            SocialHubPlatform("Discord", "https://discord.com", Color(0xFF5865F2), "D"),
+            SocialHubPlatform("LinkedIn", "https://www.linkedin.com", Color(0xFF0077B5), "in"),
+            SocialHubPlatform("Snapchat", "https://www.snapchat.com", Color(0xFFFFFC00), "S"),
+            SocialHubPlatform("Tumblr", "https://www.tumblr.com", Color(0xFF35465C), "t"),
+            SocialHubPlatform("Vimeo", "https://www.vimeo.com", Color(0xFF1AB7EA), "v"),
+            SocialHubPlatform("Dailymotion", "https://www.dailymotion.com", Color(0xFF0066DC), "d"),
+            SocialHubPlatform("Bilibili", "https://www.bilibili.com", Color(0xFF00A1D6), "bi"),
+            SocialHubPlatform("Twitch", "https://www.twitch.tv", Color(0xFF9146FF), "Tw"),
+            SocialHubPlatform("Kwai", "https://www.kwai.com", Color(0xFFFF5000), "K"),
+            SocialHubPlatform("Likee", "https://likee.video", Color(0xFFFF5C5C), "L", useGradient = true, gradientColors = listOf(Color(0xFFFF5C5C), Color(0xFFFFCD00))),
+            SocialHubPlatform("SoundCloud", "https://soundcloud.com", Color(0xFFFF5500), "sc"),
+            SocialHubPlatform("Spotify Web", "https://open.spotify.com", Color(0xFF1DB954), "Sp"),
+            SocialHubPlatform("Mixcloud", "https://www.mixcloud.com", Color(0xFF52AAD8), "mc"),
+            SocialHubPlatform("Patreon", "https://www.patreon.com", Color(0xFFF96854), "P|"),
+            SocialHubPlatform("Medium", "https://medium.com", Color(0xFF090909), "M"),
+            SocialHubPlatform("Quora", "https://www.quora.com", Color(0xFFB92B27), "Q"),
+            SocialHubPlatform("VK", "https://vk.com", Color(0xFF4C75A3), "VK"),
+            SocialHubPlatform("Weibo", "https://weibo.com", Color(0xFFE6162D), "Wb"),
+            SocialHubPlatform("Messenger", "https://www.messenger.com", Color(0xFF006AFF), "m", useGradient = true, gradientColors = listOf(Color(0xFF00B2FE), Color(0xFF006AFF), Color(0xFFFF6961))),
+            SocialHubPlatform("Line", "https://line.me", Color(0xFF06C755), "L"),
+            SocialHubPlatform("Kakao", "https://www.kakaocorp.com", Color(0xFFFFE812), "Kk"),
+            SocialHubPlatform("Flickr", "https://www.flickr.com", Color(0xFF0063DB), "fl"),
+            SocialHubPlatform("Imgur", "https://imgur.com", Color(0xFF1BB76E), "im"),
+            SocialHubPlatform("Rumble", "https://rumble.com", Color(0xFF85C226), "R"),
+            SocialHubPlatform("Odysee", "https://odysee.com", Color(0xFFEF1A50), "Od"),
+            SocialHubPlatform("PeerTube", "https://joinpeertube.org", Color(0xFFF1680D), "PT"),
+            SocialHubPlatform("Naver", "https://www.naver.com", Color(0xFF03C75A), "N"),
+            SocialHubPlatform("Yahoo", "https://www.yahoo.com", Color(0xFF6001D2), "Y!"),
+            SocialHubPlatform("Blogger", "https://www.blogger.com", Color(0xFFFC4F08), "B"),
+            SocialHubPlatform("DeviantArt", "https://www.deviantart.com", Color(0xFF05CC47), "DA"),
+            SocialHubPlatform("Behance", "https://www.behance.net", Color(0xFF1769FF), "be"),
+            SocialHubPlatform("Dribbble", "https://dribbble.com", Color(0xFFEA4C89), "dr"),
+            SocialHubPlatform("Substack", "https://substack.com", Color(0xFFFF6719), "S_"),
+            SocialHubPlatform("Kick", "https://kick.com", Color(0xFF53FC18), "Ki"),
+            SocialHubPlatform("Trovo", "https://trovo.live", Color(0xFF11BD6E), "Tr"),
+            SocialHubPlatform("Dailyhunt", "https://m.dailyhunt.in", Color(0xFF1A73E8), "Dh"),
+            SocialHubPlatform("ShareChat", "https://sharechat.com", Color(0xFFFF0055), "SC"),
+            SocialHubPlatform("Moj", "https://mojapp.in", Color(0xFFFFC400), "Moj"),
+            SocialHubPlatform("Mastodon", "https://joinmastodon.org", Color(0xFF6364FF), "Mst"),
+            SocialHubPlatform("GitHub", "https://github.com", Color(0xFF181717), "Git")
+        )
+    }
+
+    val filteredPlatforms = remember(searchQuery) {
+        if (searchQuery.isBlank()) {
+            socialPlatforms
+        } else {
+            socialPlatforms.filter {
+                it.name.contains(searchQuery, ignoreCase = true)
+            }
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismissRequest,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth(0.94f)
+                .fillMaxHeight(0.88f)
+                .padding(vertical = 12.dp)
+                .testTag("social_hub_dialog"),
+            shape = RoundedCornerShape(28.dp),
+            colors = CardDefaults.cardColors(containerColor = dialogBg),
+            elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
+            border = BorderStroke(1.dp, brandPrimary.copy(alpha = 0.35f))
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize()
+            ) {
+                // Header with Search and Close
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 14.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "Social Hub",
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 22.sp
+                                ),
+                                color = textColor
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Explore & search 50+ popular platforms safely",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = secondaryTextColor
+                            )
+                        }
+
+                        IconButton(
+                            onClick = onDismissRequest,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (isDarkTheme) Color(0xFF222530) else Color(0xFFF1F3F9))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close",
+                                tint = textColor
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Inline Search Bar
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        placeholder = {
+                            Text(
+                                "Search popular sites...",
+                                fontSize = 14.sp,
+                                color = secondaryTextColor
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = null,
+                                tint = secondaryTextColor,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        },
+                        trailingIcon = {
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { searchQuery = "" }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Clear,
+                                        contentDescription = "Clear",
+                                        tint = secondaryTextColor,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = searchBg,
+                            unfocusedContainerColor = searchBg,
+                            focusedBorderColor = brandPrimary.copy(alpha = 0.6f),
+                            unfocusedBorderColor = Color.Transparent,
+                            focusedLabelColor = textColor,
+                            unfocusedLabelColor = secondaryTextColor,
+                            cursorColor = brandPrimary
+                        ),
+                        shape = RoundedCornerShape(16.dp),
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(
+                            color = textColor,
+                            fontSize = 14.sp
+                        )
+                    )
+                }
+
+                HorizontalDivider(color = dividerColor, thickness = 1.dp)
+
+                // Scrollable content
+                if (filteredPlatforms.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = null,
+                                tint = secondaryTextColor.copy(alpha = 0.5f),
+                                modifier = Modifier.size(48.dp)
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                "No platforms found",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = textColor
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "Try searching for another platform",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = secondaryTextColor
+                            )
+                        }
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 88.dp),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .weight(1f)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        contentPadding = PaddingValues(bottom = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        gridItems(filteredPlatforms) { platform ->
+                            Column(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { onPlatformClick(platform.url) }
+                                    .padding(vertical = 12.dp, horizontal = 4.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                // Dynamic Platform Icon Design
+                                Box(
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .clip(CircleShape)
+                                        .then(
+                                            if (platform.useGradient) {
+                                                Modifier.background(Brush.linearGradient(colors = platform.gradientColors))
+                                            } else {
+                                                Modifier.background(platform.iconColor)
+                                            }
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (platform.isCustomPlayIcon) {
+                                        Icon(
+                                            imageVector = Icons.Default.PlayArrow,
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                    } else if (platform.isCustomMusicIcon) {
+                                        Icon(
+                                            imageVector = Icons.Default.MusicNote,
+                                            contentDescription = null,
+                                            tint = Color(0xFF25F4EE), // Cyan accent
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    } else if (platform.isCustomCameraIcon) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(22.dp)
+                                                .border(1.8.dp, Color.White, RoundedCornerShape(6.dp)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(8.dp)
+                                                    .border(1.4.dp, Color.White, CircleShape)
+                                            )
+                                        }
+                                    } else if (platform.isCustomTwitterIcon) {
+                                        Text(
+                                            text = "𝕏",
+                                            color = Color.White,
+                                            fontSize = 20.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    } else {
+                                        val isYellow = platform.iconColor == Color(0xFFFFFC00) || platform.iconColor == Color(0xFFFFE812)
+                                        Text(
+                                            text = platform.iconLetter,
+                                            color = if (isYellow) Color.Black else Color.White,
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                Text(
+                                    text = platform.name,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = textColor,
+                                    textAlign = TextAlign.Center,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 data class ShortcutItem(
     val label: String,
     val url: String,
@@ -6044,148 +6503,477 @@ data class ShortcutItem(
     val color: Color
 )
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun AboutBrowserDialog(
     isDarkTheme: Boolean,
     onDismissRequest: () -> Unit
 ) {
+    val brandPrimary = Color(0xFFD0BCFF)
+    val cardBackground = if (isDarkTheme) Color(0xFF1E202B) else Color(0xFFF7F8FC)
+    val dialogBg = if (isDarkTheme) Color(0xFF12141C) else Color(0xFFFFFFFF)
+    val textColor = if (isDarkTheme) Color.White else Color(0xFF1C1B1F)
+    val secondaryTextColor = if (isDarkTheme) Color(0xFFCAD0DB) else Color(0xFF49454F)
+    val dividerColor = if (isDarkTheme) Color(0xFF2E3245) else Color(0xFFE1E2EC)
+
     Dialog(
         onDismissRequest = onDismissRequest,
-        properties = DialogProperties(usePlatformDefaultWidth = true)
+        properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Card(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (isDarkTheme) Color(0xFF1F2937) else Color.White
-            ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-            border = BorderStroke(
-                width = 1.dp,
-                color = if (isDarkTheme) Color(0xFF1F2937) else Color.LightGray.copy(alpha = 0.4f)
-            )
+                .fillMaxWidth(0.94f)
+                .fillMaxHeight(0.88f)
+                .padding(vertical = 12.dp),
+            shape = RoundedCornerShape(28.dp),
+            colors = CardDefaults.cardColors(containerColor = dialogBg),
+            elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
+            border = BorderStroke(1.dp, brandPrimary.copy(alpha = 0.35f))
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .fillMaxSize()
             ) {
-                // Large beautifully rendered high quality logo representation
-                Box(
+                // Persistent Top Bar with dismissal
+                Row(
                     modifier = Modifier
-                        .size(100.dp)
-                        .clip(RoundedCornerShape(24.dp))
-                        .background(if (isDarkTheme) Color(0xFF0D1117) else Color(0xFFF1F3F4))
-                        .padding(18.dp),
-                    contentAlignment = Alignment.Center
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Language,
-                        contentDescription = "Able Browser Logo",
-                        tint = YellowGoldCustom,
-                        modifier = Modifier.size(64.dp)
+                    Text(
+                        text = "About Browser",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = textColor
+                        )
                     )
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Text(
-                    text = "Able Browser",
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = if (isDarkTheme) Color.White else Color(0xFF202124),
-                    textAlign = TextAlign.Center
-                )
-
-                val dialogContext = androidx.compose.ui.platform.LocalContext.current
-                val currentVer = AppVersionInfo.getVersionName(dialogContext)
-                Text(
-                    text = "Companion Secure Client v$currentVer",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (isDarkTheme) CinemaGold else CinemaRed,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(top = 2.dp, bottom = 16.dp)
-                )
-
-                Text(
-                    text = "A dedicated private web-browsing companion client designed exclusively for movie & drama enthusiasts. Intercepts aggressive redirect loops, filters intrusive ad placements, and offers a secure environment for offline downloading.",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Normal,
-                    lineHeight = 18.sp,
-                    color = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(bottom = 20.dp)
-                )
-
-                // Feature pills
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    val features = listOf(
-                        Triple(Icons.Default.Security, "Secure Sandbox", "Prevents unauthorized browser page redirections."),
-                        Triple(Icons.Default.Block, "Ad Blocking Filter", "Blocks annoying pop-ups on streaming mirrors."),
-                        Triple(Icons.Default.Download, "Supercharged Downloads", "A highly robust system for caching film data safely.")
-                    )
-
-                    features.forEach { (icon, title, desc) ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(
-                                    color = if (isDarkTheme) Color(0xFF0D1117) else Color(0xFFF1F3F4),
-                                    shape = RoundedCornerShape(12.dp)
-                                )
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = icon,
-                                contentDescription = title,
-                                tint = if (isDarkTheme) CinemaGold else CinemaRed,
-                                modifier = Modifier.size(24.dp)
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column {
-                                Text(
-                                    text = title,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isDarkTheme) Color.White else Color(0xFF202124)
-                                )
-                                Text(
-                                    text = desc,
-                                    fontSize = 11.sp,
-                                    color = if (isDarkTheme) Color.LightGray else Color(0xFF5F6368),
-                                    lineHeight = 14.sp
-                                )
-                            }
-                        }
+                    IconButton(
+                        onClick = onDismissRequest,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = textColor.copy(alpha = 0.7f)
+                        )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                HorizontalDivider(color = dividerColor, thickness = 1.dp)
 
-                Button(
-                    onClick = onDismissRequest,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isDarkTheme) CinemaGold else CinemaRed,
-                        contentColor = if (isDarkTheme) Color.Black else Color.White
-                    ),
-                    shape = RoundedCornerShape(24.dp),
+                // Scrollable Content
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp, vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // Page Header - App Logo Representations
+                    Box(
+                        modifier = Modifier
+                            .size(82.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(brandPrimary.copy(alpha = 0.15f))
+                            .border(1.5.dp, brandPrimary, RoundedCornerShape(20.dp))
+                            .padding(14.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Language,
+                            contentDescription = "Able Browser Logo",
+                            tint = brandPrimary,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Text(
+                        text = "Able Browser",
+                        style = MaterialTheme.typography.headlineMedium.copy(
+                            fontWeight = FontWeight.ExtraBold,
+                            color = textColor,
+                            letterSpacing = 0.5.sp
+                        )
+                    )
+
+                    Text(
+                        text = "\"Fast, Smart & Built For Modern Browsing\"",
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontWeight = FontWeight.Medium,
+                            color = brandPrimary,
+                            textAlign = TextAlign.Center
+                        ),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                    )
+
+                    val dialogContext = androidx.compose.ui.platform.LocalContext.current
+                    val currentVer = AppVersionInfo.getVersionName(dialogContext)
+
+                    // Version & Dev Badge Card
+                    Row(
+                        modifier = Modifier
+                            .padding(top = 8.dp, bottom = 20.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(brandPrimary.copy(alpha = 0.08f))
+                            .border(0.5.dp, brandPrimary.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "v$currentVer",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = textColor
+                            )
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(4.dp)
+                                .clip(CircleShape)
+                                .background(textColor.copy(alpha = 0.5f))
+                        )
+                        Text(
+                            text = "Developer: Able Team",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                color = secondaryTextColor
+                            )
+                        )
+                    }
+
+                    // About Description Box - Custom Premium Bengali styling
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = cardBackground),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 24.dp),
+                        border = BorderStroke(0.5.dp, brandPrimary.copy(alpha = 0.15f))
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                text = "ABOUT ABLE BROWSER",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = brandPrimary,
+                                    letterSpacing = 1.sp
+                                ),
+                                modifier = Modifier.padding(bottom = 6.dp)
+                            )
+                            Text(
+                                text = "Able Browser is a modern, high-performance web browser designed for speed, intelligence, and fluid navigation. Built from the ground up to offer an elegant browsing experience, it incorporates robust security sandboxing, powerful web-media stream scanner, and highly resilient session state management. Enjoy your favorite content with zero interruptions, optimized memory footprint, and perfect layout rendering across all devices.",
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    lineHeight = 22.sp,
+                                    color = textColor
+                                )
+                            )
+                        }
+                    }
+
+                    // Core Features Section header
+                    Text(
+                        text = "CORE FEATURES",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = textColor,
+                            letterSpacing = 0.5.sp
+                        ),
+                        modifier = Modifier
+                            .align(Alignment.Start)
+                            .padding(bottom = 12.dp)
+                    )
+
+                    // Core Feature Cards
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        val coreFeatures = listOf(
+                            Triple(Icons.Default.Speed, "Fast Browsing Engine", "Experience fluid layouts and responsive scroll physics with fully accelerated rendering."),
+                            Triple(Icons.Default.Search, "Smart Search System", "Get dynamic query suggestions and elegant URL auto-completion the instant you start typing."),
+                            Triple(Icons.Default.Layers, "Multi-Tab Browsing", "Effortlessly create, switch, and manage multiple open websites simultaneously from an interactive grid."),
+                            Triple(Icons.Default.PlayCircle, "Video Detection Technology", "An intelligent background scanner that automatically discovers compatible media streams on active pages."),
+                            Triple(Icons.Default.HighQuality, "Dynamic Resolution Detection", "Accurately scans and organizes available video stream options, detailing resolution, format, and bitrate info."),
+                            Triple(Icons.Default.Download, "Download Integration", "Clean, automatic integration with background download managers for swift file caching and offline access."),
+                            Triple(Icons.Default.Security, "Privacy Focused Browsing", "Deep sandboxing protocols designed to proactively halt unwanted redirect chains and malicious alert events."),
+                            Triple(Icons.Default.Devices, "Responsive Interface", "Beautifully tailored layout classes that deliver a high-end experience across phones, tablets, foldables, and TVs."),
+                            Triple(Icons.Default.Brightness4, "Dark & Light Theme Support", "Unifies dark and light system styles to reduce visual strain, matching active ambient backdrops perfectly."),
+                            Triple(Icons.AutoMirrored.Filled.ArrowForward, "Fast Navigation System", "Navigate pages smoothly with instantaneous back-and-forth action states, designed for snappy traversal.")
+                        )
+
+                        coreFeatures.forEach { (icon, title, desc) ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(cardBackground, RoundedCornerShape(16.dp))
+                                    .border(0.5.dp, brandPrimary.copy(alpha = 0.1f), RoundedCornerShape(16.dp))
+                                    .padding(14.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .clip(CircleShape)
+                                        .background(brandPrimary.copy(alpha = 0.12f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = icon,
+                                        contentDescription = title,
+                                        tint = brandPrimary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(14.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = title,
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = textColor
+                                        )
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = desc,
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            color = secondaryTextColor,
+                                            lineHeight = 16.sp
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(26.dp))
+
+                    // Why Choose Section
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.Start
+                    ) {
+                        Text(
+                            text = "WHY CHOOSE ABLE BROWSER",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = textColor
+                            ),
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+
+                        val whyChooseList = listOf(
+                            "Clean Interface",
+                            "Smooth Performance",
+                            "Optimized Resource Usage",
+                            "Modern User Experience",
+                            "Responsive Design",
+                            "Smart Media Detection",
+                            "Reliable Browsing Environment"
+                        )
+
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(start = 4.dp, bottom = 26.dp)
+                        ) {
+                            whyChooseList.forEach { reason ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = "Check",
+                                        tint = brandPrimary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = reason,
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            fontWeight = FontWeight.Medium,
+                                            color = textColor
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Compatibility Section
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.Start
+                    ) {
+                        Text(
+                            text = "COMPATIBILITY",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = textColor
+                            ),
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+                        Text(
+                            text = "Supported Devices:",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = secondaryTextColor
+                            ),
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+
+                        val supportedDevices = listOf(
+                            "Android Phones",
+                            "Android Tablets",
+                            "Foldable Devices",
+                            "Android TV",
+                            "Smart TV",
+                            "Chromebook"
+                        )
+
+                        FlowRow(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 26.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            supportedDevices.forEach { device ->
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(cardBackground)
+                                        .border(0.5.dp, brandPrimary.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Text(
+                                        text = device,
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            color = textColor,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Performance Highlights
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.Start
+                    ) {
+                        Text(
+                            text = "PERFORMANCE HIGHLIGHTS",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = textColor
+                            ),
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+
+                        val performanceList = listOf(
+                            "Fast Startup",
+                            "Smooth Scrolling",
+                            "Responsive UI",
+                            "Optimized Memory Usage",
+                            "Stable Navigation",
+                            "Modern Rendering Experience"
+                        )
+
+                        FlowRow(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 24.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            performanceList.forEach { highlight ->
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(brandPrimary.copy(alpha = 0.06f))
+                                        .border(0.5.dp, brandPrimary.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Bolt,
+                                        contentDescription = "Bolt",
+                                        tint = brandPrimary,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = highlight,
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            color = textColor,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = dividerColor, thickness = 1.dp, modifier = Modifier.padding(vertical = 12.dp))
+
+                    // Footer Sections
+                    Text(
+                        text = "Able Browser",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = textColor
+                        )
+                    )
+                    Text(
+                        text = "\"Built for Faster, Smarter and Better Browsing\"",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = secondaryTextColor,
+                            textAlign = TextAlign.Center
+                        ),
+                        modifier = Modifier.padding(top = 2.dp, bottom = 4.dp)
+                    )
+                    Text(
+                        text = "Current Version: v$currentVer",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            color = brandPrimary
+                        ),
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                }
+
+                HorizontalDivider(color = dividerColor, thickness = 1.dp)
+
+                // Bottom Action buttons
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(48.dp)
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "Dismiss",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp
-                    )
+                    Button(
+                        onClick = onDismissRequest,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = brandPrimary,
+                            contentColor = Color(0xFF1C133A)
+                        ),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                    ) {
+                        Text(
+                            text = "Dismiss",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontWeight = FontWeight.Bold
+                            )
+                        )
+                    }
                 }
             }
         }
@@ -6215,12 +7003,12 @@ fun SearchSuggestionsDropdown(
             .testTag("search_suggestions_panel"),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isDarkTheme) Color(0xFF1F2937) else Color.White
+            containerColor = if (isDarkTheme) Color(0xFF1E202B) else Color.White
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
         border = BorderStroke(
             width = 1.dp,
-            color = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFE0E0E0)
+            color = if (isDarkTheme) Color(0xFF2E3245) else Color(0xFFE0E0E0)
         )
     ) {
         Column(modifier = Modifier.padding(vertical = 8.dp)) {
@@ -6310,7 +7098,7 @@ fun SearchSuggestionsDropdown(
             if (hasHistorySearch) {
                 HorizontalDivider(
                     thickness = 0.5.dp,
-                    color = if (isDarkTheme) Color(0xFF1F1F28) else Color(0xFFECEFF1),
+                    color = if (isDarkTheme) Color(0xFF2E3245) else Color(0xFFECEFF1),
                     modifier = Modifier.padding(vertical = 4.dp)
                 )
 

@@ -528,12 +528,30 @@ object VideoAnalyzer {
             sub
         }
         
-        val targetFile = File(defaultDir, safeName)
+        var finalName = safeName
+        var targetFile = File(defaultDir, finalName)
+        if (targetFile.exists()) {
+            val extPart = safeName.substringAfterLast(".", "")
+            var basePart = safeName.substringBeforeLast(".")
+            val rx = Regex("""^(.+)\((\d+)\)$""")
+            val match = rx.matchEntire(basePart)
+            var counter = 1
+            if (match != null) {
+                basePart = match.groupValues[1]
+            }
+            var uniqueFile = File(defaultDir, if (extPart.isNotEmpty()) "$basePart($counter).$extPart" else "$basePart($counter)")
+            while (uniqueFile.exists()) {
+                counter++
+                uniqueFile = File(defaultDir, if (extPart.isNotEmpty()) "$basePart($counter).$extPart" else "$basePart($counter)")
+            }
+            targetFile = uniqueFile
+            finalName = targetFile.name
+        }
         
         scope.launch(Dispatchers.IO) {
             val item = DownloadItem(
                 url = cleanUrl,
-                fileName = safeName,
+                fileName = finalName,
                 filePath = targetFile.absolutePath,
                 fileSize = estimatedSize,
                 bytesDownloaded = 0L,
@@ -932,12 +950,30 @@ object VideoAnalyzer {
             sub
         }
         
-        val targetFile = File(defaultDir, safeName)
+        var finalName = safeName
+        var targetFile = File(defaultDir, finalName)
+        if (targetFile.exists()) {
+            val extPart = safeName.substringAfterLast(".", "")
+            var basePart = safeName.substringBeforeLast(".")
+            val rx = Regex("""^(.+)\((\d+)\)$""")
+            val match = rx.matchEntire(basePart)
+            var counter = 1
+            if (match != null) {
+                basePart = match.groupValues[1]
+            }
+            var uniqueFile = File(defaultDir, if (extPart.isNotEmpty()) "$basePart($counter).$extPart" else "$basePart($counter)")
+            while (uniqueFile.exists()) {
+                counter++
+                uniqueFile = File(defaultDir, if (extPart.isNotEmpty()) "$basePart($counter).$extPart" else "$basePart($counter)")
+            }
+            targetFile = uniqueFile
+            finalName = targetFile.name
+        }
         
         scope.launch(Dispatchers.IO) {
             val item = DownloadItem(
                 url = cleanUrl,
-                fileName = safeName,
+                fileName = finalName,
                 filePath = targetFile.absolutePath,
                 fileSize = estimatedSize,
                 bytesDownloaded = 0L,
