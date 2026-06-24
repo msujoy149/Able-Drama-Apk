@@ -92,6 +92,8 @@ object DownloadEngine {
         appContext = context.applicationContext
         repository = repo
         
+        ensureFolderStructure(context)
+        
         // Download recovery system for validation, cleanup, and broken task recovery
         engineScope.launch {
             try {
@@ -105,6 +107,35 @@ object DownloadEngine {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error in startup download recovery system", e)
+            }
+        }
+
+        // Auto-resume failed downloads upon network connectivity restoration
+        engineScope.launch {
+            var wasOffline = false
+            try {
+                NetworkMonitor(context.applicationContext).isOnline.collect { isOnline ->
+                    if (isOnline) {
+                        if (wasOffline) {
+                            val prefs = context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE)
+                            val autoResumeEnabled = prefs.getBoolean("auto_resume_failed", true)
+                            if (autoResumeEnabled) {
+                                delay(3000L) // Wait a brief moment for the connection to fully stabilize
+                                val allTasks = repo.allDownloads.first()
+                                val failedTasks = allTasks.filter { it.status == "ERROR" }
+                                for (task in failedTasks) {
+                                    Log.d(TAG, "Auto-resuming failed download task: ${task.fileName}")
+                                    startDownload(context, task.id)
+                                }
+                            }
+                        }
+                        wasOffline = false
+                    } else {
+                        wasOffline = true
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in auto-resume network monitor loop", e)
             }
         }
     }
@@ -186,6 +217,90 @@ object DownloadEngine {
         val job = engineScope.launch(Dispatchers.IO) {
             val repo = repository ?: return@launch
             var item = repo.getDownloadById(itemId) ?: return@launch
+
+            // Automatic Folder Categorization & Duplicate File Handling Preprocessing
+            val prefs = context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE)
+            val autoCategorize = prefs.getBoolean("auto_categorize_downloads", true)
+            
+            var currentFile = File(item.filePath)
+            var currentDir = currentFile.parentFile ?: android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+            var currentName = item.fileName
+            
+            if (autoCategorize) {
+                val ext = currentName.substringAfterLast(".", "").lowercase()
+                val category = when (ext) {
+                    "mp4", "mkv", "webm", "avi", "mov", "flv", "wmv", "3gp", "ts", "m3u8" -> "Videos"
+                    "mp3", "aac", "wav", "m4a", "flac", "ogg", "wma", "opus" -> "Audio"
+                    "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "rtf", "epub", "csv" -> "Documents"
+                    "apk", "xapk", "apks" -> "APK"
+                    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "svg" -> "Images"
+                    "zip", "rar", "7z", "tar", "gz", "bz2" -> "Archives"
+                    else -> "Others"
+                }
+                val rootDownloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                val ableDramaFolder = File(rootDownloadDir, "AbleDrama")
+                if (!ableDramaFolder.exists()) ableDramaFolder.mkdirs()
+                val targetSubFolder = File(ableDramaFolder, category)
+                if (!targetSubFolder.exists()) targetSubFolder.mkdirs()
+                
+                currentDir = targetSubFolder
+            }
+            
+            val duplicateRule = prefs.getString("duplicate_file_handling", "Rename") ?: "Rename"
+            var finalFile = File(currentDir, currentName)
+            
+            if (finalFile.exists()) {
+                when (duplicateRule) {
+                    "Rename" -> {
+                        val baseName = currentName.substringBeforeLast(".")
+                        val ext = currentName.substringAfterLast(".", "")
+                        var counter = 1
+                        var testName = if (ext.isNotEmpty()) "$baseName($counter).$ext" else "$baseName($counter)"
+                        var testFile = File(currentDir, testName)
+                        while (testFile.exists()) {
+                            counter++
+                            testName = if (ext.isNotEmpty()) "$baseName($counter).$ext" else "$baseName($counter)"
+                            testFile = File(currentDir, testName)
+                        }
+                        currentName = testName
+                        finalFile = testFile
+                    }
+                    "Replace", "Replace Existing File" -> {
+                        try {
+                            if (finalFile.exists()) {
+                                finalFile.delete()
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error deleting existing file for replace rule", e)
+                        }
+                    }
+                    "Skip", "Skip Download" -> {
+                        val fileSize = if (item.fileSize > 0) item.fileSize else finalFile.length()
+                        repo.updateDownload(item.copy(
+                            status = "FINISHED",
+                            bytesDownloaded = fileSize,
+                            progress = 100f,
+                            downloadSpeed = "Skipped",
+                            eta = "Completed"
+                        ))
+                        try {
+                            CoroutineScope(Dispatchers.Main).launch {
+                                Toast.makeText(context, "Download skipped: $currentName already exists!", Toast.LENGTH_SHORT).show()
+                            }
+                        } catch (e: Exception) {}
+                        return@launch
+                    }
+                }
+            }
+            
+            if (finalFile.absolutePath != item.filePath) {
+                item = item.copy(
+                    filePath = finalFile.absolutePath,
+                    fileName = currentName
+                )
+                repo.updateDownload(item)
+            }
+
             var urlSpec = item.url
 
             var consecutiveErrors = 0
@@ -349,7 +464,20 @@ object DownloadEngine {
         totalLength: Long
     ) {
         var item = initialItem
-        val numParts = 4
+        val sharedPrefs = context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE)
+        
+        // Backward-compatible thread count detector:
+        var numParts = sharedPrefs.getInt("download_threads_limit", 4)
+        var existingPartsCount = 0
+        for (idx in 0..100) {
+            if (File(item.filePath + ".part$idx").exists()) {
+                existingPartsCount = idx + 1
+            }
+        }
+        if (existingPartsCount > 0) {
+            numParts = existingPartsCount
+        }
+
         val partSize = totalLength / numParts
         
         val partBytesDownloaded = LongArray(numParts)
@@ -424,11 +552,36 @@ object DownloadEngine {
                             val buffer = ByteArray(32768)
                             var bytesRead: Int
                             
+                            // Speed Limit Throttling state per worker thread
+                            val limitBps = getSpeedLimitBytesPerSecond(context)
+                            val threadLimitBps = if (limitBps < Long.MAX_VALUE) limitBps / numParts else Long.MAX_VALUE
+                            var speedWindowStart = System.currentTimeMillis()
+                            var speedWindowBytes = 0L
+
                             while (isActive) {
+                                // Rate limiting throttling
+                                if (threadLimitBps < Long.MAX_VALUE) {
+                                    val now = System.currentTimeMillis()
+                                    val elapsed = now - speedWindowStart
+                                    if (elapsed >= 1000) {
+                                        speedWindowStart = now
+                                        speedWindowBytes = 0L
+                                    } else {
+                                        val maxAllowedBytes = (threadLimitBps * elapsed) / 1000L
+                                        if (speedWindowBytes > maxAllowedBytes) {
+                                            val sleepTime = ((speedWindowBytes * 1000L) / threadLimitBps) - elapsed
+                                            if (sleepTime > 0) {
+                                                delay(sleepTime)
+                                            }
+                                        }
+                                    }
+                                }
+
                                 bytesRead = inputStream.read(buffer)
                                 if (bytesRead == -1) break
 
                                 raf.write(buffer, 0, bytesRead)
+                                speedWindowBytes += bytesRead
                                 
                                 synchronized(tickerMutex) {
                                     totalDownloaded += bytesRead
@@ -644,7 +797,30 @@ object DownloadEngine {
                 val buffer = ByteArray(65536)
                 var bytesRead: Int
 
+                // Speed Limit Throttling state for single thread
+                val limitBps = getSpeedLimitBytesPerSecond(context)
+                var speedWindowStart = System.currentTimeMillis()
+                var speedWindowBytes = 0L
+
                 while (isActive) {
+                    // Rate limiting throttling
+                    if (limitBps < Long.MAX_VALUE) {
+                        val now = System.currentTimeMillis()
+                        val elapsed = now - speedWindowStart
+                        if (elapsed >= 1000) {
+                            speedWindowStart = now
+                            speedWindowBytes = 0L
+                        } else {
+                            val maxAllowedBytes = (limitBps * elapsed) / 1000L
+                            if (speedWindowBytes > maxAllowedBytes) {
+                                val sleepTime = ((speedWindowBytes * 1000L) / limitBps) - elapsed
+                                if (sleepTime > 0) {
+                                    delay(sleepTime)
+                                }
+                            }
+                        }
+                    }
+
                     try {
                         bytesRead = inputStream.read(buffer)
                     } catch (e: Exception) {
@@ -653,6 +829,7 @@ object DownloadEngine {
                     if (bytesRead == -1) break
 
                     raf.write(buffer, 0, bytesRead)
+                    speedWindowBytes += bytesRead
                     totalDownloaded += bytesRead
                     downloadedSinceLastUpdate += bytesRead
 
@@ -876,6 +1053,23 @@ object DownloadEngine {
         }
     }
 
+    private fun getSpeedLimitBytesPerSecond(context: Context): Long {
+        val prefs = context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE)
+        val option = prefs.getString("download_speed_limit_option", "Unlimited") ?: "Unlimited"
+        if (option == "Unlimited") return Long.MAX_VALUE
+        
+        val kbLimit = when (option) {
+            "100KB/s" -> 100
+            "500KB/s" -> 500
+            "1MB/s" -> 1024
+            "5MB/s" -> 5 * 1024
+            "10MB/s" -> 10 * 1024
+            "Custom" -> prefs.getInt("download_speed_limit_custom_kb", 1000)
+            else -> return Long.MAX_VALUE
+        }
+        return kbLimit.toLong() * 1024L
+    }
+
     private fun formatSpeed(bytesPerSec: Long): String {
         val df = DecimalFormat("#.##")
         return when {
@@ -890,6 +1084,25 @@ object DownloadEngine {
             seconds >= 3600 -> "${seconds / 3600}h ${(seconds % 3600) / 60}m"
             seconds >= 60 -> "${seconds / 60}m ${seconds % 60}s"
             else -> "${seconds}s"
+        }
+    }
+
+    fun ensureFolderStructure(context: Context) {
+        try {
+            val rootDownloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+            val ableDramaFolder = File(rootDownloadDir, "AbleDrama")
+            if (!ableDramaFolder.exists()) {
+                ableDramaFolder.mkdirs()
+            }
+            val subFolders = listOf("Videos", "Audio", "Documents", "APK", "Images", "Archives", "Others")
+            for (sub in subFolders) {
+                val f = File(ableDramaFolder, sub)
+                if (!f.exists()) {
+                    f.mkdirs()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initializing folders", e)
         }
     }
 }

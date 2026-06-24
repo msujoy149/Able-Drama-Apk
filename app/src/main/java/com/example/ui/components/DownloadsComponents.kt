@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import com.example.MainActivity
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Environment
@@ -1030,9 +1031,47 @@ fun DownloadManagerDialog(
     var concurrentDownloadsLimit by remember { 
         mutableIntStateOf(sharedPrefs.getInt("concurrent_downloads_limit", 3)) 
     }
+
+    var downloadThreadsLimit by remember {
+        mutableIntStateOf(sharedPrefs.getInt("download_threads_limit", 4))
+    }
+    var autoResumeFailed by remember {
+        mutableStateOf(sharedPrefs.getBoolean("auto_resume_failed", true))
+    }
+    var downloadSpeedLimitOption by remember {
+        mutableStateOf(sharedPrefs.getString("download_speed_limit_option", "Unlimited") ?: "Unlimited")
+    }
+    var downloadSpeedLimitCustomKb by remember {
+        mutableIntStateOf(sharedPrefs.getInt("download_speed_limit_custom_kb", 1000))
+    }
+    var downloadBubbleEnabled by remember {
+        mutableStateOf(sharedPrefs.getBoolean("download_bubble_enabled", true))
+    }
+    var downloadBubbleSize by remember {
+        mutableStateOf(sharedPrefs.getString("download_bubble_size", "Medium") ?: "Medium")
+    }
+    var downloadBubbleAlpha by remember {
+        mutableFloatStateOf(sharedPrefs.getFloat("download_bubble_alpha", 0.85f))
+    }
+    var downloadBubbleSnap by remember {
+        mutableStateOf(sharedPrefs.getBoolean("download_bubble_snap", true))
+    }
+    
+    var autoCategorizeDownloads by remember {
+        mutableStateOf(sharedPrefs.getBoolean("auto_categorize_downloads", true))
+    }
+    var duplicateFileHandlingOption by remember {
+        mutableStateOf(sharedPrefs.getString("duplicate_file_handling", "Rename") ?: "Rename")
+    }
+    var showDuplicateHandlingDialog by remember { mutableStateOf(false) }
+    var showManageFoldersDialog by remember { mutableStateOf(false) }
     
     var showMenu by remember { mutableStateOf(false) }
     var showConcurrentDownloadsDialog by remember { mutableStateOf(false) }
+    var showDownloadThreadsDialog by remember { mutableStateOf(false) }
+    var showAutoResumeDialog by remember { mutableStateOf(false) }
+    var showSpeedLimitDialog by remember { mutableStateOf(false) }
+    var showBubbleSettingsDialog by remember { mutableStateOf(false) }
     var showDownloadPathDialog by remember { mutableStateOf(false) }
     var showBatteryOptimizationDialog by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
@@ -1366,6 +1405,38 @@ fun DownloadManagerDialog(
                                             }
                                         )
                                         DropdownMenuItem(
+                                            text = { Text("Maximum download threads") },
+                                            leadingIcon = { Icon(Icons.Default.NetworkCheck, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                showDownloadThreadsDialog = true
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Download speed limit") },
+                                            leadingIcon = { Icon(Icons.Default.Speed, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                showSpeedLimitDialog = true
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Auto-resume failed downloads") },
+                                            leadingIcon = { Icon(Icons.Default.Autorenew, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                showAutoResumeDialog = true
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Floating download bubble") },
+                                            leadingIcon = { Icon(Icons.Default.SettingsInputAntenna, contentDescription = null) }, // Beautiful antenna/bubble settings icon
+                                            onClick = {
+                                                showMenu = false
+                                                showBubbleSettingsDialog = true
+                                            }
+                                        )
+                                        DropdownMenuItem(
                                             text = { Text("Sort downloads order") },
                                             leadingIcon = { Icon(Icons.Default.Sort, contentDescription = null) },
                                             onClick = {
@@ -1393,6 +1464,44 @@ fun DownloadManagerDialog(
                                         )
                                         
                                         HorizontalDivider()
+                                        // FILE MANAGEMENT
+                                        Text(
+                                            text = "File Management",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Auto Categorize Downloads") },
+                                            leadingIcon = { Icon(Icons.Default.Category, contentDescription = null) },
+                                            trailingIcon = {
+                                                Switch(
+                                                    checked = autoCategorizeDownloads,
+                                                    onCheckedChange = { newVal ->
+                                                        autoCategorizeDownloads = newVal
+                                                        sharedPrefs.edit().putBoolean("auto_categorize_downloads", newVal).apply()
+                                                        Toast.makeText(context, "Auto Categorization ${if (newVal) "Enabled" else "Disabled"}", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                )
+                                            },
+                                            onClick = {
+                                                val newVal = !autoCategorizeDownloads
+                                                autoCategorizeDownloads = newVal
+                                                sharedPrefs.edit().putBoolean("auto_categorize_downloads", newVal).apply()
+                                                Toast.makeText(context, "Auto Categorization ${if (newVal) "Enabled" else "Disabled"}", Toast.LENGTH_SHORT).show()
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Duplicate File Handling") },
+                                            leadingIcon = { Icon(Icons.Default.FileCopy, contentDescription = null) },
+                                            onClick = {
+                                                showMenu = false
+                                                showDuplicateHandlingDialog = true
+                                            }
+                                        )
+                                        
+                                        HorizontalDivider()
                                         // BATTERY SETTINGS
                                         Text(
                                             text = "Battery Settings",
@@ -1411,67 +1520,9 @@ fun DownloadManagerDialog(
                                         )
                                         
                                         HorizontalDivider()
-                                        // ADDITIONAL USEFUL OPTIONS
-                                        Text(
-                                            text = "Additional Options",
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 11.sp,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Download Statistics") },
-                                            leadingIcon = { Icon(Icons.Default.BarChart, contentDescription = null) },
-                                            onClick = {
-                                                showMenu = false
-                                                showDownloadStatsDialog = true
-                                            }
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Retry Failed Downloads") },
-                                            leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
-                                            onClick = {
-                                                showMenu = false
-                                                coroutineScope.launch {
-                                                    val failedCount = allDownloads.count { it.status == "ERROR" }
-                                                    allDownloads.forEach {
-                                                        if (it.status == "ERROR") {
-                                                            DownloadEngine.startDownload(context, it.id, this)
-                                                        }
-                                                    }
-                                                    Toast.makeText(context, "Retrying $failedCount failed downloads", Toast.LENGTH_SHORT).show()
-                                                }
-                                            }
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Clear Completed Downloads") },
-                                            leadingIcon = { Icon(Icons.Default.DoneAll, contentDescription = null) },
-                                            onClick = {
-                                                showMenu = false
-                                                coroutineScope.launch {
-                                                    val completed = allDownloads.filter { it.status == "FINISHED" }
-                                                    completed.forEach { downloadRepository.deleteDownload(it) }
-                                                    Toast.makeText(context, "Cleared ${completed.size} completed items", Toast.LENGTH_SHORT).show()
-                                                }
-                                            }
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Clear Failed Downloads") },
-                                            leadingIcon = { Icon(Icons.Default.ErrorOutline, contentDescription = null) },
-                                            onClick = {
-                                                showMenu = false
-                                                coroutineScope.launch {
-                                                    val failed = allDownloads.filter { it.status == "ERROR" }
-                                                    failed.forEach { downloadRepository.deleteDownload(it) }
-                                                    Toast.makeText(context, "Cleared ${failed.size} failed items", Toast.LENGTH_SHORT).show()
-                                                }
-                                            }
-                                        )
-                                        
-                                        HorizontalDivider()
                                         // APP INFO
                                         DropdownMenuItem(
-                                            text = { Text("About & Version Info") },
+                                            text = { Text("About Us") },
                                             leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
                                             onClick = {
                                                 showMenu = false
@@ -1933,6 +1984,601 @@ fun DownloadManagerDialog(
                 confirmButton = {
                     TextButton(onClick = { showConcurrentDownloadsDialog = false }) {
                         Text("Dismiss")
+                    }
+                }
+            )
+        }
+
+        if (showDownloadThreadsDialog) {
+            AlertDialog(
+                onDismissRequest = { showDownloadThreadsDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.NetworkCheck,
+                            contentDescription = "Threads icon",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Download Threads Limit",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column {
+                        Text(
+                            text = "Set the maximum number of simultaneous threads/connections per download task. Higher threads speed up downloads but consume more server resources:",
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        listOf(1, 4, 8, 16, 32).forEach { threads ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        downloadThreadsLimit = threads
+                                        sharedPrefs.edit().putInt("download_threads_limit", threads).apply()
+                                        showDownloadThreadsDialog = false
+                                        Toast.makeText(context, "Thread limit set to $threads connections!", Toast.LENGTH_SHORT).show()
+                                    }
+                                    .padding(vertical = 12.dp, horizontal = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = downloadThreadsLimit == threads,
+                                    onClick = {
+                                        downloadThreadsLimit = threads
+                                        sharedPrefs.edit().putInt("download_threads_limit", threads).apply()
+                                        showDownloadThreadsDialog = false
+                                        Toast.makeText(context, "Thread limit set to $threads connections!", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = when (threads) {
+                                        4 -> "4 Threads (Default)"
+                                        8 -> "8 Threads (High Speed)"
+                                        16 -> "16 Threads (Turbo Core)"
+                                        32 -> "32 Threads (Extreme Speed)"
+                                        else -> "1 Thread (Single Connection)"
+                                    },
+                                    fontSize = 15.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showDownloadThreadsDialog = false }) {
+                        Text("Dismiss")
+                    }
+                }
+            )
+        }
+
+        if (showAutoResumeDialog) {
+            AlertDialog(
+                onDismissRequest = { showAutoResumeDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Autorenew,
+                            contentDescription = "Auto resume icon",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Auto-Resume Failed Tasks",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column {
+                        Text(
+                            text = "When enabled, Able Drama will automatically attempt to resume any failed or interrupted download tasks immediately upon internet network restoration.",
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val newVal = !autoResumeFailed
+                                    autoResumeFailed = newVal
+                                    sharedPrefs.edit().putBoolean("auto_resume_failed", newVal).apply()
+                                }
+                                .padding(vertical = 12.dp, horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = autoResumeFailed,
+                                onCheckedChange = { newVal ->
+                                    autoResumeFailed = newVal
+                                    sharedPrefs.edit().putBoolean("auto_resume_failed", newVal).apply()
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Auto Resume Failed Downloads",
+                                fontSize = 15.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showAutoResumeDialog = false }) {
+                        Text("Save")
+                    }
+                }
+            )
+        }
+
+        if (showSpeedLimitDialog) {
+            AlertDialog(
+                onDismissRequest = { showSpeedLimitDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Speed,
+                            contentDescription = "Speed limit icon",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Download Speed Limit",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        Text(
+                            text = "Throttle download speeds to conserve network bandwidth for other applications or streams:",
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        listOf("Unlimited", "100KB/s", "500KB/s", "1MB/s", "5MB/s", "10MB/s", "Custom").forEach { option ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        downloadSpeedLimitOption = option
+                                        sharedPrefs.edit().putString("download_speed_limit_option", option).apply()
+                                        if (option != "Custom") {
+                                            showSpeedLimitDialog = false
+                                            Toast.makeText(context, "Speed limit set to $option!", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                    .padding(vertical = 10.dp, horizontal = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = downloadSpeedLimitOption == option,
+                                    onClick = {
+                                        downloadSpeedLimitOption = option
+                                        sharedPrefs.edit().putString("download_speed_limit_option", option).apply()
+                                        if (option != "Custom") {
+                                            showSpeedLimitDialog = false
+                                            Toast.makeText(context, "Speed limit set to $option!", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = option,
+                                    fontSize = 15.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+
+                        if (downloadSpeedLimitOption == "Custom") {
+                            val customLimitMbStr = String.format("%.1f", downloadSpeedLimitCustomKb / 1024f)
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "Custom Limit: ${downloadSpeedLimitCustomKb} KB/s ($customLimitMbStr MB/s)",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Slider(
+                                value = downloadSpeedLimitCustomKb.toFloat(),
+                                onValueChange = { newVal ->
+                                    val rounded = newVal.toInt().coerceIn(50, 50000)
+                                    downloadSpeedLimitCustomKb = rounded
+                                    sharedPrefs.edit().putInt("download_speed_limit_custom_kb", rounded).apply()
+                                },
+                                valueRange = 50f..50000f,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showSpeedLimitDialog = false }) {
+                        Text("Save")
+                    }
+                }
+            )
+        }
+
+        if (showBubbleSettingsDialog) {
+            AlertDialog(
+                onDismissRequest = { showBubbleSettingsDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.SettingsInputAntenna,
+                            contentDescription = "Bubble icon",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Floating Bubble Settings",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        Text(
+                            text = "Configure the visual and physical properties of the floating video analyzer bubble on your browser screens:",
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Enable/Disable Bubble
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val newVal = !downloadBubbleEnabled
+                                    downloadBubbleEnabled = newVal
+                                    sharedPrefs.edit().putBoolean("download_bubble_enabled", newVal).apply()
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = downloadBubbleEnabled,
+                                onCheckedChange = { newVal ->
+                                    downloadBubbleEnabled = newVal
+                                    sharedPrefs.edit().putBoolean("download_bubble_enabled", newVal).apply()
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Enable Floating Bubble", fontSize = 14.sp)
+                        }
+
+                        // Snap to Edge Settings
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val newVal = !downloadBubbleSnap
+                                    downloadBubbleSnap = newVal
+                                    sharedPrefs.edit().putBoolean("download_bubble_snap", newVal).apply()
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = downloadBubbleSnap,
+                                onCheckedChange = { newVal ->
+                                    downloadBubbleSnap = newVal
+                                    sharedPrefs.edit().putBoolean("download_bubble_snap", newVal).apply()
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Snap to nearest edge on drag release", fontSize = 14.sp)
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Bubble Size selector
+                        Text("Bubble Size", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.primary)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            listOf("Small", "Medium", "Large").forEach { size ->
+                                Row(
+                                    modifier = Modifier
+                                        .clickable {
+                                            downloadBubbleSize = size
+                                            sharedPrefs.edit().putString("download_bubble_size", size).apply()
+                                        }
+                                        .padding(vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = downloadBubbleSize == size,
+                                        onClick = {
+                                            downloadBubbleSize = size
+                                            sharedPrefs.edit().putString("download_bubble_size", size).apply()
+                                        }
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(size, fontSize = 13.sp)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Transparency settings slider
+                        val percentText = (downloadBubbleAlpha * 100).toInt()
+                        Text("Bubble Opacity: $percentText%", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.primary)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Slider(
+                            value = downloadBubbleAlpha,
+                            onValueChange = { newVal ->
+                                val rounded = (newVal * 100).toInt() / 100f
+                                downloadBubbleAlpha = rounded
+                                sharedPrefs.edit().putFloat("download_bubble_alpha", rounded).apply()
+                            },
+                            valueRange = 0.2f..1.0f,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Reset Position Button
+                        Button(
+                            onClick = {
+                                MainActivity.floatingButtonDragX = 0f
+                                MainActivity.floatingButtonDragY = 0f
+                                Toast.makeText(context, "Bubble position reset to default!", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer)
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Reset Bubble Position", fontSize = 13.sp)
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showBubbleSettingsDialog = false }) {
+                        Text("Close")
+                    }
+                }
+            )
+        }
+
+        if (showDuplicateHandlingDialog) {
+            AlertDialog(
+                onDismissRequest = { showDuplicateHandlingDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.FileCopy,
+                            contentDescription = "Duplicate Handling",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Duplicate File Handling",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column {
+                        Text(
+                            text = "Choose how the system handles duplicate files detected in your download directory:",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            modifier = Modifier.padding(bottom = 16.dp)
+                        )
+                        
+                        val options = listOf("Rename", "Replace Existing File", "Skip Download")
+                        options.forEach { option ->
+                            val mappedValue = when (option) {
+                                "Rename" -> "Rename"
+                                "Replace Existing File" -> "Replace"
+                                "Skip Download" -> "Skip"
+                                else -> "Rename"
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        duplicateFileHandlingOption = mappedValue
+                                        sharedPrefs.edit().putString("duplicate_file_handling", mappedValue).apply()
+                                    }
+                                    .padding(vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = (duplicateFileHandlingOption == mappedValue),
+                                    onClick = {
+                                        duplicateFileHandlingOption = mappedValue
+                                        sharedPrefs.edit().putString("duplicate_file_handling", mappedValue).apply()
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = option,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    val desc = when (mappedValue) {
+                                        "Rename" -> "Automatically appends a counter (e.g. (1), (2)) to keep both files."
+                                        "Replace" -> "Deletes the existing file and starts a fresh download."
+                                        "Skip" -> "Cancels the download task if the file already exists on disk."
+                                        else -> ""
+                                    }
+                                    Text(
+                                        text = desc,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showDuplicateHandlingDialog = false }) {
+                        Text("Close")
+                    }
+                }
+            )
+        }
+
+        if (showManageFoldersDialog) {
+            AlertDialog(
+                onDismissRequest = { showManageFoldersDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Folder,
+                            contentDescription = "Folder Structure",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Manage Download Folders",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    val subFolderNames = listOf("Videos", "Audio", "Documents", "APK", "Images", "Archives", "Others")
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 400.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Text(
+                            text = "AbleDrama Folder Structure (Internal Storage/Download/AbleDrama):",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+                        
+                        subFolderNames.forEach { subName ->
+                            val stats = remember(subName) {
+                                try {
+                                    val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                                    val ableDramaFolder = File(rootDownloadDir, "AbleDrama")
+                                    val folder = File(ableDramaFolder, subName)
+                                    if (folder.exists() && folder.isDirectory) {
+                                        val files = folder.listFiles() ?: emptyArray()
+                                        val count = files.size
+                                        val size = files.sumOf { if (it.isFile) it.length() else 0L }
+                                        Pair(count, size)
+                                    } else {
+                                        Pair(0, 0L)
+                                    }
+                                } catch (e: Exception) {
+                                    Pair(0, 0L)
+                                }
+                            }
+                            
+                            val subIcon = when (subName) {
+                                "Videos" -> Icons.Default.PlayArrow
+                                "Audio" -> Icons.Default.Audiotrack
+                                "Documents" -> Icons.Default.Description
+                                "APK" -> Icons.Default.Android
+                                "Images" -> Icons.Default.Image
+                                "Archives" -> Icons.Default.Folder
+                                else -> Icons.Default.Category
+                            }
+                            
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = subIcon,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(32.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = subName,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 14.sp,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = formatStatsLabel(stats.first, stats.second),
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            val rootDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                                            val ableDramaFolder = File(rootDownloadDir, "AbleDrama")
+                                            val subFolder = File(ableDramaFolder, subName)
+                                            if (!subFolder.exists()) subFolder.mkdirs()
+                                            openFolder(context, subFolder)
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.FolderOpen,
+                                            contentDescription = "Open Folder",
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showManageFoldersDialog = false }) {
+                        Text("Close")
                     }
                 }
             )
@@ -3177,7 +3823,7 @@ fun DownloadItemRow(
                     fontSize = 13.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    color = if (item.status == "ERROR") Color(0xFFFFB300) else MaterialTheme.colorScheme.onSurface
+                    color = MaterialTheme.colorScheme.onSurface
                 )
 
                 Spacer(modifier = Modifier.height(3.dp))
@@ -3362,7 +4008,7 @@ fun DownloadItemRow(
                         Icon(
                             imageVector = Icons.Default.Refresh,
                             contentDescription = "Quick Retry",
-                            tint = Color(0xFF111827),
+                            tint = Color.White,
                             modifier = Modifier.size(15.dp)
                         )
                     }
@@ -3375,7 +4021,7 @@ fun DownloadItemRow(
                             Icon(
                                 imageVector = Icons.Default.MoreVert,
                                 contentDescription = "Error options",
-                                tint = Color(0xFF111827),
+                                tint = Color.White,
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -3587,25 +4233,23 @@ fun DownloadItemRow(
                         )
                         
                         // Action 2: REDOWNLOAD
-                        if (item.status != "ERROR") {
-                            Text(
-                                text = "REDOWNLOAD",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 12.sp,
-                                color = Color(0xFF7F3DFF),
-                                modifier = Modifier
-                                    .clickable(
-                                        onClick = {
-                                            showConfirmRetryDialog = false
-                                            redownloadItem(context, item, downloadRepository, coroutineScope, withOptions = false)
-                                        }
-                                    )
-                                    .padding(horizontal = 6.dp, vertical = 6.dp),
-                                maxLines = 1,
-                                softWrap = false,
-                                letterSpacing = 0.2.sp
-                            )
-                        }
+                        Text(
+                            text = "REDOWNLOAD",
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.sp,
+                            color = Color(0xFF7F3DFF),
+                            modifier = Modifier
+                                .clickable(
+                                    onClick = {
+                                        showConfirmRetryDialog = false
+                                        redownloadItem(context, item, downloadRepository, coroutineScope, withOptions = false)
+                                    }
+                                )
+                                .padding(horizontal = 6.dp, vertical = 6.dp),
+                            maxLines = 1,
+                            softWrap = false,
+                            letterSpacing = 0.2.sp
+                        )
                         
                         // Action 3: RESUME / PAUSE / START AGAIN
                         val actionText = when (item.status) {
@@ -4673,6 +5317,60 @@ private fun getMediaMetadata(filePath: String): MediaMetadataInfo? {
         try {
             retriever.release()
         } catch (e: Exception) {}
+    }
+}
+
+private fun formatStatsLabel(count: Int, bytes: Long): String {
+    if (bytes <= 0) return "$count files • 0 B"
+    val units = arrayOf("B", "KB", "MB", "GB")
+    val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt()
+    val group = if (digitGroups < units.size) digitGroups else units.size - 1
+    val formattedSize = String.format(java.util.Locale.US, "%.1f %s", bytes / Math.pow(1024.0, group.toDouble()), units[group])
+    return "$count files • $formattedSize"
+}
+
+private fun openFolder(context: android.content.Context, folder: java.io.File) {
+    try {
+        if (!folder.exists()) {
+            folder.mkdirs()
+        }
+        val intent = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
+            setDataAndType(android.net.Uri.fromFile(folder), "*/*")
+            addCategory(android.content.Intent.CATEGORY_OPENABLE)
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        try {
+            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    folder
+                )
+                setDataAndType(uri, "resource/folder")
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (ex: Exception) {
+            try {
+                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                    val rootDownloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        rootDownloadDir
+                    )
+                    setDataAndType(uri, "*/*")
+                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            } catch (ex2: Exception) {
+                android.widget.Toast.makeText(context, "Cannot open folder directly. Please use your device's File Manager and navigate to Downloads -> AbleDrama", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
     }
 }
 

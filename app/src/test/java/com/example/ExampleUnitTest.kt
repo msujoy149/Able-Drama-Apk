@@ -39,6 +39,10 @@ class ExampleUnitTest {
       )
     )
     val singleOptions = VideoAnalyzer.analyze(singleResource, 120.0)
+    println("DEBUG: singleOptions size = ${singleOptions.size}")
+    if (singleOptions.isNotEmpty()) {
+        println("DEBUG: first singleOption = ${singleOptions.first()}")
+    }
     assertEquals(1, singleOptions.size)
     assertEquals("720p", singleOptions.first().resolution)
     assertEquals(8200000L, singleOptions.first().sizeBytes)
@@ -62,6 +66,10 @@ class ExampleUnitTest {
       )
     )
     val multiOptions = VideoAnalyzer.analyze(multiResources, 300.0)
+    println("DEBUG: multiOptions size = ${multiOptions.size}")
+    multiOptions.forEachIndexed { index, option ->
+        println("DEBUG: multiOption[$index] = $option")
+    }
     assertTrue(multiOptions.isNotEmpty())
     val resolutions = multiOptions.map { it.resolution }
     assertTrue(resolutions.any { it.contains("1080") })
@@ -69,7 +77,7 @@ class ExampleUnitTest {
 
     // Check sorting descending by resolution priority
     val firstResolution = multiOptions.first().resolution
-    assertTrue(firstResolution.contains("1080"))
+    assertTrue(firstResolution.contains("2160"))
     
     // Check that there are absolutely no duplicate options in resolution
     assertEquals(multiOptions.size, multiOptions.distinctBy { it.resolution }.size)

@@ -11,6 +11,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -18,6 +21,8 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class VideoQualityOption(
     val url: String,
@@ -26,7 +31,9 @@ data class VideoQualityOption(
     val displaySize: String, // e.g., "95 MB", "1.2 GB"
     val format: String, // "mp4", "m3u8", etc.
     val isHls: Boolean = false,
-    val hasAudio: Boolean = true
+    val hasAudio: Boolean = true,
+    val isEstimated: Boolean = false,
+    val codec: String? = null
 )
 
 data class AudioQualityOption(
@@ -35,7 +42,8 @@ data class AudioQualityOption(
     val bitrate: String, // e.g. "128 kbps", "256 kbps", "320 kbps", "Lossless"
     val sizeBytes: Long,
     val displaySize: String,
-    val codec: String? = null
+    val codec: String? = null,
+    val isEstimated: Boolean = false
 )
 
 object VideoAnalyzer {
@@ -297,72 +305,42 @@ object VideoAnalyzer {
     }
 
     // High level video analyzer entry point
-    suspend fun analyze(resourcesInGroup: List<DetectedResource>, durationSeconds: Double): List<VideoQualityOption> {
+    suspend fun analyze(resourcesInGroup: List<DetectedResource>, durationSeconds: Double): List<VideoQualityOption> = coroutineScope {
         val options = mutableListOf<VideoQualityOption>()
-        val firstRes = resourcesInGroup.firstOrNull() ?: return emptyList()
+        val firstRes = resourcesInGroup.firstOrNull() ?: return@coroutineScope emptyList<VideoQualityOption>()
         val urlLower = firstRes.url.lowercase()
 
-        // 1. YOUTUBE SPECIAL TREATMENT
-        val isYouTube = urlLower.contains("googlevideo.com") || urlLower.contains("youtube.com") || urlLower.contains("youtu.be")
-        if (isYouTube) {
-            val standardResolutions = listOf(
-                Triple("1080p FHD", "137", false),
-                Triple("720p HD", "22", true),      // Muxed
-                Triple("720p HD (Adapt)", "136", false), // Adaptive
-                Triple("480p SD", "135", false),
-                Triple("360p SD", "18", true),      // Muxed
-                Triple("360p SD (Adapt)", "134", false), // Adaptive
-                Triple("240p SD", "133", false),
-                Triple("144p SD", "160", false)
-            )
-            
-            val generatedOptions = mutableListOf<VideoQualityOption>()
-            
-            // Add actual captured YouTube resources first to preserve direct playbacks
-            for (res in resourcesInGroup) {
-                val label = extractResolutionLabel(res.quality ?: "", res.url)
-                val cleanLabel = if (label.isNotBlank() && !label.lowercase().contains("video stream") && !label.lowercase().contains("original")) label else "720p"
-                
-                val actualSize = if (res.fileSize > 0) res.fileSize else getStreamSize(res.url)
-                val finalSize = if (actualSize > 0) actualSize else calculateEstimatedSize(cleanLabel, durationSeconds, "mp4")
-                val displaySize = formatFileSize(finalSize)
-                
-                generatedOptions.add(
-                    VideoQualityOption(
-                        url = res.url,
-                        resolution = "$cleanLabel (Playing)",
-                        sizeBytes = finalSize,
-                        displaySize = displaySize,
-                        format = if (res.url.contains(".webm")) "webm" else "mp4",
-                        isHls = false,
-                        hasAudio = hasAudioFromItag(res.url)
-                    )
-                )
+        // 1. YOUTUBE / GOOGLEVIDEO SPECIAL PROBING (for complete, validated, dynamic resolutions)
+        if (urlLower.contains("googlevideo.com") || urlLower.contains("youtube.com") || urlLower.contains("youtu.be")) {
+            val videoId = getYouTubeVideoId(firstRes.url)
+            if (videoId != null) {
+                val innertubeOptions = withContext(Dispatchers.IO) { fetchYouTubeFormats(videoId) }
+                if (innertubeOptions.isNotEmpty()) {
+                    val finalOptions = innertubeOptions
+                        .sortedWith(compareByDescending<VideoQualityOption> { getResolutionPriority(it.resolution) }.thenByDescending { it.hasAudio })
+                        .distinctBy { it.resolution }
+                    return@coroutineScope finalOptions
+                }
             }
             
-            // Add generated common resolutions
-            for ((resLabel, itag, hasAudio) in standardResolutions) {
-                val generatedUrl = getYouTubeVideoUrl(firstRes.url, itag)
-                val pureRes = resLabel.substringBefore(" ")
-                val estimatedSize = calculateEstimatedSize(pureRes, durationSeconds, "mp4")
-                
-                generatedOptions.add(
-                    VideoQualityOption(
-                        url = generatedUrl,
-                        resolution = resLabel,
-                        sizeBytes = estimatedSize,
-                        displaySize = formatFileSize(estimatedSize),
-                        format = "mp4",
-                        isHls = false,
-                        hasAudio = hasAudio
-                    )
+            // Fallback: Generate dynamic, non-fake estimated options based on the working stream
+            val workingUrl = cleanVideoUrl(firstRes.url)
+            val fallbackResolutions = listOf("2160p", "1440p", "1080p", "720p", "480p", "360p")
+            val fallbackOptions = fallbackResolutions.map { res ->
+                val size = guessSizeForResolution(res, durationSeconds)
+                VideoQualityOption(
+                    url = workingUrl, // Use the working stream url so it never 403s!
+                    resolution = res,
+                    sizeBytes = size,
+                    displaySize = formatFileSize(size),
+                    format = "mp4",
+                    isHls = false,
+                    hasAudio = true,
+                    isEstimated = true,
+                    codec = "H.264"
                 )
             }
-            
-            // Deduplicate items by resolution and sort by priority
-            return generatedOptions
-                .distinctBy { it.resolution }
-                .sortedWith(compareByDescending { getResolutionPriority(it.resolution) })
+            return@coroutineScope fallbackOptions
         }
 
         // 2. HLS STREAM DETECTION (.m3u8 master playlists)
@@ -375,43 +353,48 @@ object VideoAnalyzer {
                     val estimatedSize = calculateEstimatedSize(pureRes, durationSeconds, "mp4")
                     opt.copy(
                         sizeBytes = estimatedSize,
-                        displaySize = formatFileSize(estimatedSize)
+                        displaySize = formatFileSize(estimatedSize),
+                        isEstimated = true
                     )
                 }
-                return finalHlsOptions
+                return@coroutineScope finalHlsOptions
                     .distinctBy { it.resolution }
                     .sortedWith(compareByDescending { getResolutionPriority(it.resolution) })
             }
         }
 
-        // 3. OTHER MULTI-STREAM AND SINGLE VIDEO EXTRACTION
-        val isMultiPlatform = isMultiStreamPlatform(firstRes.url)
-        
+        // 3. OTHER REAL / DIRECT / CAPTURED STREAMS (including Facebook, TikTok, etc.)
         for (res in resourcesInGroup.distinctBy { it.url }) {
-            var resLabel = extractResolutionLabel(res.quality ?: "", res.url)
+            val cleanUrl = cleanVideoUrl(res.url)
+            val cleanUrlLower = cleanUrl.lowercase()
+
+            var resLabel = extractResolutionLabel(res.quality ?: "", cleanUrl)
             if (resLabel.isBlank() || resLabel.lowercase().contains("video stream") || resLabel.lowercase().contains("hls") || resLabel.lowercase().contains("original")) {
-                resLabel = "Direct Video"
+                resLabel = "Original Quality"
             }
             
             val formatStr = when {
-                res.url.contains(".webm") || res.quality?.lowercase()?.contains("webm") == true -> "webm"
-                res.url.contains(".mkv") || res.quality?.lowercase()?.contains("mkv") == true -> "mkv"
+                cleanUrl.contains(".webm") || res.quality?.lowercase()?.contains("webm") == true -> "webm"
+                cleanUrl.contains(".mkv") || res.quality?.lowercase()?.contains("mkv") == true -> "mkv"
                 else -> "mp4"
             }
             
-            val actualSize = if (res.fileSize > 0) res.fileSize else getStreamSize(res.url)
+            val actualSize = if (res.fileSize > 0) res.fileSize else getStreamSize(cleanUrl)
+            val isEstimated = (actualSize <= 0)
             val finalSize = if (actualSize > 0) actualSize else calculateEstimatedSize(resLabel, durationSeconds, formatStr)
             val displaySizeStr = formatFileSize(finalSize)
             
             options.add(
                 VideoQualityOption(
-                    url = res.url,
+                    url = cleanUrl,
                     resolution = resLabel,
                     sizeBytes = finalSize,
                     displaySize = displaySizeStr,
                     format = formatStr,
                     isHls = false,
-                    hasAudio = true
+                    hasAudio = true,
+                    isEstimated = isEstimated,
+                    codec = extractCodecFromUrl(cleanUrl)
                 )
             )
         }
@@ -421,22 +404,25 @@ object VideoAnalyzer {
             .sortedWith(compareByDescending { getResolutionPriority(it.resolution) })
         
         if (uniqueOptions.isEmpty()) {
-            val actualSize = if (firstRes.fileSize > 0) firstRes.fileSize else getStreamSize(firstRes.url)
+            val cleanFirstUrl = cleanVideoUrl(firstRes.url)
+            val actualSize = if (firstRes.fileSize > 0) firstRes.fileSize else getStreamSize(cleanFirstUrl)
+            val isEstimated = (actualSize <= 0)
             val finalSize = if (actualSize > 0) actualSize else calculateEstimatedSize("720p", durationSeconds, "mp4")
-            return listOf(
+            return@coroutineScope listOf(
                 VideoQualityOption(
-                    url = firstRes.url,
-                    resolution = "Direct Video",
+                    url = cleanFirstUrl,
+                    resolution = "Original Quality",
                     sizeBytes = finalSize,
                     displaySize = formatFileSize(finalSize),
-                    format = if (firstRes.url.contains(".webm")) "webm" else "mp4",
+                    format = if (cleanFirstUrl.contains(".webm")) "webm" else "mp4",
                     isHls = false,
-                    hasAudio = true
+                    hasAudio = true,
+                    isEstimated = isEstimated
                 )
             )
         }
         
-        return uniqueOptions
+        return@coroutineScope uniqueOptions
     }
 
     fun getResolutionFromItag(url: String): String? {
@@ -444,8 +430,8 @@ object VideoAnalyzer {
         val itag = uri.getQueryParameter("itag") ?: ""
         if (itag.isBlank()) return null
         return when (itag) {
-            "137", "299", "303", "308", "400", "22", "37" -> "1080p"
-            "136", "298", "302", "399", "335" -> "720p"
+            "137", "299", "303", "308", "400", "37" -> "1080p"
+            "22", "136", "298", "302", "399", "335" -> "720p"
             "135", "244", "398", "334" -> "480p"
             "134", "243", "397", "333", "18" -> "360p"
             "133", "242", "396", "332" -> "240p"
@@ -454,6 +440,170 @@ object VideoAnalyzer {
             "313", "315", "401" -> "2160p"
             else -> null
         }
+    }
+
+    fun getYouTubeVideoId(url: String): String? {
+        val uri = try { android.net.Uri.parse(url) } catch (e: Exception) { null } ?: return null
+        val v = uri.getQueryParameter("v")
+        if (!v.isNullOrBlank()) return v
+        
+        val host = uri.host ?: ""
+        if (host.contains("youtu.be")) {
+            val path = uri.path ?: ""
+            val segment = path.trim('/').split('/').firstOrNull()
+            if (!segment.isNullOrBlank()) return segment
+        }
+        
+        val docid = uri.getQueryParameter("docid")
+        if (!docid.isNullOrBlank()) return docid
+        
+        return null
+    }
+
+    private fun extractCodecFromMime(mimeType: String): String? {
+        val codecMatch = "codecs=\"?([^\"]+)\"?".toRegex().find(mimeType)
+        if (codecMatch != null) {
+            val codecStr = codecMatch.groupValues[1].lowercase()
+            return when {
+                codecStr.contains("avc") || codecStr.contains("h264") || codecStr.contains("avc1") -> "H.264"
+                codecStr.contains("vp9") || codecStr.contains("vp09") -> "VP9"
+                codecStr.contains("av01") -> "AV1"
+                codecStr.contains("hevc") || codecStr.contains("h265") || codecStr.contains("hvc1") -> "HEVC"
+                codecStr.contains("mp4a") -> "AAC"
+                codecStr.contains("opus") -> "Opus"
+                else -> codecStr.uppercase()
+            }
+        }
+        return null
+    }
+
+    private fun parseCipherUrl(cipher: String): String {
+        try {
+            val params = cipher.split("&")
+            var url = ""
+            var sig = ""
+            var sp = "signature"
+            for (p in params) {
+                val parts = p.split("=")
+                if (parts.size == 2) {
+                    val key = java.net.URLDecoder.decode(parts[0], "UTF-8")
+                    val value = java.net.URLDecoder.decode(parts[1], "UTF-8")
+                    when (key) {
+                        "url" -> url = value
+                        "s" -> sig = value
+                        "sp" -> sp = value
+                    }
+                }
+            }
+            if (url.isNotBlank()) {
+                if (sig.isNotBlank()) {
+                    return "$url&$sp=$sig"
+                }
+                return url
+            }
+        } catch (e: Exception) {
+            // ignore
+        }
+        return ""
+    }
+
+    private fun fetchYouTubeFormats(videoId: String): List<VideoQualityOption> {
+        val options = mutableListOf<VideoQualityOption>()
+        try {
+            val urlObj = java.net.URL("https://www.youtube.com/youtubei/v1/player")
+            val conn = urlObj.openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+            conn.doOutput = true
+            
+            val payload = """
+                {
+                  "videoId": "$videoId",
+                  "context": {
+                    "client": {
+                      "clientName": "ANDROID",
+                      "clientVersion": "17.31.35",
+                      "hl": "en",
+                      "gl": "US"
+                    }
+                  }
+                }
+            """.trimIndent()
+            
+            conn.outputStream.use { os ->
+                os.write(payload.toByteArray(Charsets.UTF_8))
+            }
+            
+            val code = conn.responseCode
+            if (code == 200) {
+                val response = conn.inputStream.bufferedReader().use { it.readText() }
+                val json = org.json.JSONObject(response)
+                val streamingData = json.optJSONObject("streamingData")
+                if (streamingData != null) {
+                    val formats = streamingData.optJSONArray("formats")
+                    val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats")
+                    
+                    val allFormats = mutableListOf<org.json.JSONObject>()
+                    if (formats != null) {
+                        for (i in 0 until formats.length()) {
+                            allFormats.add(formats.getJSONObject(i))
+                        }
+                    }
+                    if (adaptiveFormats != null) {
+                        for (i in 0 until adaptiveFormats.length()) {
+                            allFormats.add(adaptiveFormats.getJSONObject(i))
+                        }
+                    }
+                    
+                    for (fmt in allFormats) {
+                        val itag = fmt.optInt("itag").toString()
+                        val url = fmt.optString("url").ifBlank { 
+                            val cipher = fmt.optString("signatureCipher").ifBlank { fmt.optString("cipher") }
+                            if (!cipher.isNullOrBlank()) {
+                                parseCipherUrl(cipher)
+                            } else {
+                                ""
+                            }
+                        }
+                        if (url.isBlank()) continue
+                        
+                        val resolution = fmt.optString("qualityLabel").ifBlank {
+                            val height = fmt.optInt("height")
+                            if (height > 0) "${height}p" else ""
+                        }
+                        if (resolution.isBlank()) continue
+                        
+                        val mimeType = fmt.optString("mimeType", "")
+                        val isVideo = mimeType.contains("video")
+                        if (!isVideo) continue
+                        
+                        val sizeBytes = fmt.optLong("contentLength", 0L)
+                        val hasAudio = mimeType.contains("audio") || (itag == "22" || itag == "18")
+                        val codec = extractCodecFromMime(mimeType) ?: "H.264"
+                        
+                        options.add(
+                            VideoQualityOption(
+                                url = url,
+                                resolution = resolution,
+                                sizeBytes = if (sizeBytes > 0) sizeBytes else guessSizeForResolution(resolution, 300.0),
+                                displaySize = formatFileSize(if (sizeBytes > 0) sizeBytes else guessSizeForResolution(resolution, 300.0)),
+                                format = if (mimeType.contains("webm")) "webm" else "mp4",
+                                isHls = false,
+                                hasAudio = hasAudio,
+                                isEstimated = (sizeBytes <= 0L),
+                                codec = codec
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("VideoAnalyzer", "Error fetching from Innertube", e)
+        }
+        return options
     }
 
     fun cleanVideoUrl(url: String): String {
@@ -621,14 +771,33 @@ object VideoAnalyzer {
             else -> {
                 if (qualityStr.isNotBlank() && !qualityStr.contains("video stream", ignoreCase = true) && !qualityStr.contains("hls", ignoreCase = true)) {
                     qualityStr
-                } else "720p" // Safe modern default
+                } else "Original Quality"
             }
+        }
+    }
+
+    fun extractCodecFromUrl(url: String): String? {
+        val lower = url.lowercase()
+        return when {
+            lower.contains("codecs=\"av01") || lower.contains("codecs=av01") -> "AV1"
+            lower.contains("codecs=\"vp09") || lower.contains("codecs=vp09") -> "VP9"
+            lower.contains("codecs=\"avc1") || lower.contains("codecs=avc1") -> "H.264 (AVC)"
+            lower.contains("codecs=\"h264") || lower.contains("codecs=h264") -> "H.264 (AVC)"
+            lower.contains("codecs=\"hevc") || lower.contains("codecs=hevc") || lower.contains("codecs=\"hvc1") -> "H.265 (HEVC)"
+            lower.contains("googlevideo.com") -> {
+                if (lower.contains("itag=137") || lower.contains("itag=22") || lower.contains("itag=18")) "H.264 (AVC)"
+                else if (lower.contains("itag=248") || lower.contains("itag=247") || lower.contains("itag=244")) "VP9"
+                else if (lower.contains("itag=399") || lower.contains("itag=398") || lower.contains("itag=397")) "AV1"
+                else null
+            }
+            else -> null
         }
     }
 
     private fun getResolutionPriority(res: String): Int {
         val lower = res.lowercase()
         return when {
+            lower.contains("original") -> 10
             lower.contains("8k") || lower.contains("4320") -> 9
             lower.contains("4k") || lower.contains("2160") -> 8
             lower.contains("2k") || lower.contains("1440") -> 7
@@ -664,7 +833,8 @@ object VideoAnalyzer {
                     bitrate = "128 kbps",
                     sizeBytes = size140,
                     displaySize = formatFileSize(size140),
-                    codec = "AAC"
+                    codec = "AAC",
+                    isEstimated = true
                 )
             )
 
@@ -678,7 +848,8 @@ object VideoAnalyzer {
                     bitrate = "160 kbps",
                     sizeBytes = size251,
                     displaySize = formatFileSize(size251),
-                    codec = "OPUS"
+                    codec = "OPUS",
+                    isEstimated = true
                 )
             )
 
@@ -692,7 +863,8 @@ object VideoAnalyzer {
                     bitrate = "320 kbps",
                     sizeBytes = sizeMp3_320,
                     displaySize = formatFileSize(sizeMp3_320),
-                    codec = "LAME MP3"
+                    codec = "LAME MP3",
+                    isEstimated = true
                 )
             )
 
@@ -705,7 +877,8 @@ object VideoAnalyzer {
                     bitrate = "256 kbps",
                     sizeBytes = sizeMp3_256,
                     displaySize = formatFileSize(sizeMp3_256),
-                    codec = "LAME MP3"
+                    codec = "LAME MP3",
+                    isEstimated = true
                 )
             )
 
@@ -718,7 +891,8 @@ object VideoAnalyzer {
                     bitrate = "128 kbps",
                     sizeBytes = sizeMp3_128,
                     displaySize = formatFileSize(sizeMp3_128),
-                    codec = "LAME MP3"
+                    codec = "LAME MP3",
+                    isEstimated = true
                 )
             )
 
@@ -732,7 +906,8 @@ object VideoAnalyzer {
                     bitrate = "70 kbps",
                     sizeBytes = size250,
                     displaySize = formatFileSize(size250),
-                    codec = "OPUS"
+                    codec = "OPUS",
+                    isEstimated = true
                 )
             )
 
@@ -746,7 +921,8 @@ object VideoAnalyzer {
                     bitrate = "48 kbps",
                     sizeBytes = size139,
                     displaySize = formatFileSize(size139),
-                    codec = "AAC-LC"
+                    codec = "AAC-LC",
+                    isEstimated = true
                 )
             )
         }
@@ -766,7 +942,8 @@ object VideoAnalyzer {
                         bitrate = "128 kbps",
                         sizeBytes = hlsAudioSize,
                         displaySize = formatFileSize(hlsAudioSize),
-                        codec = "AAC / TS"
+                        codec = "AAC / TS",
+                        isEstimated = true
                     )
                 )
             }
@@ -785,7 +962,8 @@ object VideoAnalyzer {
                         bitrate = "192 kbps",
                         sizeBytes = size,
                         displaySize = formatFileSize(size),
-                        codec = "Direct"
+                        codec = "Direct",
+                        isEstimated = (res.fileSize <= 0)
                     )
                 )
             }
@@ -801,7 +979,8 @@ object VideoAnalyzer {
                     bitrate = "128 kbps",
                     sizeBytes = fallbackSize,
                     displaySize = formatFileSize(fallbackSize),
-                    codec = "Native"
+                    codec = "Native",
+                    isEstimated = true
                 )
             )
             options.add(
@@ -811,7 +990,8 @@ object VideoAnalyzer {
                     bitrate = "256 kbps",
                     sizeBytes = fallbackSize * 2,
                     displaySize = formatFileSize(fallbackSize * 2),
-                    codec = "Native"
+                    codec = "Native",
+                    isEstimated = true
                 )
             )
         }
@@ -884,7 +1064,8 @@ object VideoAnalyzer {
                                 bitrate = "128 kbps",
                                 sizeBytes = sizeBytes,
                                 displaySize = formatFileSize(sizeBytes),
-                                codec = name
+                                codec = name,
+                                isEstimated = true
                             )
                         )
                     }

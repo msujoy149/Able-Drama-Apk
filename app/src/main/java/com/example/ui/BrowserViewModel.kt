@@ -261,6 +261,10 @@ class BrowserViewModel(
         val activeTab = _browserTabs.value.find { it.id == activeId } ?: _dramaTabs.value.find { it.id == activeId }
         val pageUrl = activeTab?.url ?: currentUrl.value
         
+        if (pageUrl.contains("drive.google.com") || pageUrl.contains("docs.google.com")) {
+            return@combine emptyList<DetectedResource>()
+        }
+        
         val isDownloadable = isDownloadablePage(pageUrl) || isPlaying || videoResources.isNotEmpty()
         if (pageUrl.isBlank() || pageUrl.startsWith("browser://") || pageUrl == "about:blank" || !isDownloadable) {
             return@combine emptyList<DetectedResource>()
@@ -338,6 +342,9 @@ class BrowserViewModel(
 
     fun isValidVideoResource(url: String, title: String): Boolean {
         val urlLower = url.lowercase()
+        if (urlLower.contains("drive.google.com") || urlLower.contains("docs.google.com")) {
+            return false
+        }
         val titleLower = title.lowercase().trim()
 
         // 1. If it is a known major video platform CDN or stream URL, it is always a valid video resource!
@@ -415,6 +422,7 @@ class BrowserViewModel(
     fun isDownloadablePage(url: String): Boolean {
         val cleanUrl = url.lowercase().trim()
         if (cleanUrl.isBlank() || cleanUrl.startsWith("browser://") || cleanUrl == "about:blank") return false
+        if (cleanUrl.contains("drive.google.com") || cleanUrl.contains("docs.google.com")) return false
         
         val uri = try { android.net.Uri.parse(cleanUrl) } catch(e: Exception) { null }
         val host = uri?.host ?: ""
@@ -491,16 +499,19 @@ class BrowserViewModel(
         videoWidth: Int = 0,
         videoHeight: Int = 0
     ) {
-        if (isPlaying && activeSrc.isNotBlank()) {
-            val previousSrc = _activeVideoSrcMap.value[tabId] ?: ""
-            if (activeSrc != previousSrc) {
-                _activeVideoSrcMap.update { map ->
-                    map.toMutableMap().apply {
-                        put(tabId, activeSrc)
-                    }
+        val previousSrc = _activeVideoSrcMap.value[tabId] ?: ""
+        val previousTitle = _activeVideoTitleMap.value[tabId] ?: ""
+
+        val isNewVideo = (activeSrc.isNotBlank() && activeSrc != previousSrc) || 
+                         (activeTitle.isNotBlank() && previousTitle.isNotBlank() && activeTitle != previousTitle && !isGenericTitle(activeTitle))
+
+        if (isPlaying && isNewVideo) {
+            _activeVideoSrcMap.update { map ->
+                map.toMutableMap().apply {
+                    put(tabId, activeSrc)
                 }
-                clearDetectedResources(tabId)
             }
+            clearDetectedResources(tabId)
         }
 
         _isVideoPlayingMap.update { map ->
@@ -595,6 +606,9 @@ class BrowserViewModel(
 
     fun isValidAudioResource(url: String, title: String): Boolean {
         val urlLower = url.lowercase()
+        if (urlLower.contains("drive.google.com") || urlLower.contains("docs.google.com")) {
+            return false
+        }
         val blacklistKeywords = listOf(
             "analytics", "telemetry", "metrics", "collect", "tracker", "logging", "logger", 
             "google-analytics", "doubleclick", "googlesyndication", "/ad", "popads", "popcash", 

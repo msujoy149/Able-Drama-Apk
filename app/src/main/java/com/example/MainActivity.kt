@@ -71,6 +71,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -109,6 +111,13 @@ import com.example.ui.components.DownloadFileDialog
 import com.example.ui.components.DownloadManagerDialog
 import com.example.util.DownloadEngine
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import kotlin.math.roundToInt
 import com.example.ui.theme.*
 import androidx.compose.ui.graphics.graphicsLayer
 import com.example.util.NetworkMonitor
@@ -127,6 +136,8 @@ class MainActivity : ComponentActivity() {
     companion object {
         var isAbleDramaActive: Boolean = true
         var lastCopiedValueToIgnore: String? = null
+        var floatingButtonDragX by mutableStateOf(0f)
+        var floatingButtonDragY by mutableStateOf(0f)
     }
 
     private var customView: View? = null
@@ -141,12 +152,53 @@ class MainActivity : ComponentActivity() {
     ) : LifecycleEventObserver {
         private val handler = android.os.Handler(android.os.Looper.getMainLooper())
         private var isResumed = false
+        private var lastKnownClipboardText: String? = null
 
         private val checkClipboardRunnable = Runnable { checkClipboard() }
+        private val focusGainedRunnable = Runnable {
+            try {
+                if (isResumed && activity.hasWindowFocus()) {
+                    val currentClipText = getClipboardText()
+                    if (currentClipText != null) {
+                        lastKnownClipboardText = currentClipText
+                    }
+                }
+            } catch (t: Throwable) {
+                // Ignore
+            }
+        }
 
         private val listener = ClipboardManager.OnPrimaryClipChangedListener {
-            handler.removeCallbacks(checkClipboardRunnable)
-            handler.postDelayed(checkClipboardRunnable, 1000)
+            val vm = activity.browserViewModel
+            val isDramaMode = vm?.isDramaModeActive?.value ?: false
+            val currentUrl = vm?.currentUrl?.value
+            val isPostPage = isPostUrl(currentUrl)
+
+            if (isResumed && activity.hasWindowFocus() && isDramaMode && isPostPage) {
+                handler.removeCallbacks(checkClipboardRunnable)
+                handler.postDelayed(checkClipboardRunnable, 1000)
+            }
+        }
+
+        private fun getClipboardText(): String? {
+            try {
+                if (!activity.hasWindowFocus()) return null
+                val clipboard = activity.getClipboardManager() ?: return null
+                if (!clipboard.hasPrimaryClip()) return null
+                val clipData = clipboard.primaryClip ?: return null
+                if (clipData.itemCount > 0) {
+                    val firstItem = clipData.getItemAt(0)
+                    return firstItem?.text?.toString()?.trim()
+                }
+            } catch (e: Throwable) {
+                // Ignore
+            }
+            return null
+        }
+
+        fun onWindowFocusGained() {
+            handler.removeCallbacks(focusGainedRunnable)
+            handler.postDelayed(focusGainedRunnable, 300) // Delay to let OS focus state propagate fully
         }
 
         fun triggerCheck(delayMs: Long = 1000) {
@@ -172,6 +224,7 @@ class MainActivity : ComponentActivity() {
                 Lifecycle.Event.ON_PAUSE -> {
                     isResumed = false
                     try {
+                        handler.removeCallbacks(focusGainedRunnable)
                         val clipboard = activity.getClipboardManager()
                         clipboard?.removePrimaryClipChangedListener(listener)
                         handler.removeCallbacks(checkClipboardRunnable)
@@ -180,6 +233,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 Lifecycle.Event.ON_DESTROY -> {
+                    handler.removeCallbacks(focusGainedRunnable)
                     handler.removeCallbacks(checkClipboardRunnable)
                     source.lifecycle.removeObserver(this)
                 }
@@ -188,14 +242,14 @@ class MainActivity : ComponentActivity() {
         }
 
         private fun checkClipboard() {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                // On Android Q and higher, automatic background/resume clipboard checking is restricted by the OS
-                // and generates system log warnings. We fallback to user-initiated manual paste buttons.
-                return
-            }
             if (!isResumed) return
             if (!activity.hasWindowFocus()) return
-            if (!MainActivity.isAbleDramaActive) return
+            
+            val vm = activity.browserViewModel ?: return
+            if (!vm.isDramaModeActive.value) return
+            
+            val currentUrl = vm.currentUrl.value ?: return
+            if (!isPostUrl(currentUrl)) return
 
             try {
                 val clipboard = activity.getClipboardManager() ?: return
@@ -214,6 +268,10 @@ class MainActivity : ComponentActivity() {
                     }
                     val copiedText = firstItem?.text?.toString()?.trim()
                     if (!copiedText.isNullOrEmpty()) {
+                        if (copiedText == lastKnownClipboardText) {
+                            return
+                        }
+                        
                         val ignored = MainActivity.lastCopiedValueToIgnore
                         if (ignored != null && (copiedText == ignored || copiedText.contains(ignored) || ignored.contains(copiedText))) {
                             return
@@ -223,6 +281,7 @@ class MainActivity : ComponentActivity() {
                             if (ignored != null && (urlCandidate == ignored || urlCandidate.contains(ignored) || ignored.contains(urlCandidate))) {
                                 return
                             }
+                            lastKnownClipboardText = copiedText
                             onClipboardChanged(urlCandidate)
                         }
                     }
@@ -362,10 +421,31 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(prefs.getBoolean("is_dark_theme", true))
             }
 
+            var downloadBubbleEnabled by remember {
+                mutableStateOf(prefs.getBoolean("download_bubble_enabled", true))
+            }
+            var downloadBubbleSize by remember {
+                mutableStateOf(prefs.getString("download_bubble_size", "Medium") ?: "Medium")
+            }
+            var downloadBubbleAlpha by remember {
+                mutableStateOf(prefs.getFloat("download_bubble_alpha", 0.85f))
+            }
+            var downloadBubbleSnap by remember {
+                mutableStateOf(prefs.getBoolean("download_bubble_snap", true))
+            }
+
             androidx.compose.runtime.DisposableEffect(prefs) {
                 val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
                     if (key == "is_dark_theme") {
                         isDarkTheme = p.getBoolean("is_dark_theme", true)
+                    } else if (key == "download_bubble_enabled") {
+                        downloadBubbleEnabled = p.getBoolean("download_bubble_enabled", true)
+                    } else if (key == "download_bubble_size") {
+                        downloadBubbleSize = p.getString("download_bubble_size", "Medium") ?: "Medium"
+                    } else if (key == "download_bubble_alpha") {
+                        downloadBubbleAlpha = p.getFloat("download_bubble_alpha", 0.85f)
+                    } else if (key == "download_bubble_snap") {
+                        downloadBubbleSnap = p.getBoolean("download_bubble_snap", true)
                     }
                 }
                 prefs.registerOnSharedPreferenceChangeListener(listener)
@@ -483,7 +563,7 @@ class MainActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
-            clipboardObserver?.triggerCheck(1200)
+            clipboardObserver?.onWindowFocusGained()
         }
     }
 }
@@ -531,6 +611,38 @@ fun MainAppContent(
     onHideCustomView: () -> Unit
 ) {
     val context = LocalContext.current
+
+    val prefs = context.getSharedPreferences("abledrama_prefs", Context.MODE_PRIVATE)
+    var downloadBubbleEnabled by remember {
+        mutableStateOf(prefs.getBoolean("download_bubble_enabled", true))
+    }
+    var downloadBubbleSize by remember {
+        mutableStateOf(prefs.getString("download_bubble_size", "Medium") ?: "Medium")
+    }
+    var downloadBubbleAlpha by remember {
+        mutableFloatStateOf(prefs.getFloat("download_bubble_alpha", 0.85f))
+    }
+    var downloadBubbleSnap by remember {
+        mutableStateOf(prefs.getBoolean("download_bubble_snap", true))
+    }
+
+    androidx.compose.runtime.DisposableEffect(prefs) {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
+            if (key == "download_bubble_enabled") {
+                downloadBubbleEnabled = p.getBoolean("download_bubble_enabled", true)
+            } else if (key == "download_bubble_size") {
+                downloadBubbleSize = p.getString("download_bubble_size", "Medium") ?: "Medium"
+            } else if (key == "download_bubble_alpha") {
+                downloadBubbleAlpha = p.getFloat("download_bubble_alpha", 0.85f)
+            } else if (key == "download_bubble_snap") {
+                downloadBubbleSnap = p.getBoolean("download_bubble_snap", true)
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose {
+            prefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }
 
     // Navigation and history state list
     val navHistory = remember { mutableStateListOf<NavigationHistoryEntry>() }
@@ -1154,8 +1266,21 @@ fun MainAppContent(
                             }
 
                             // Floating Download Button on the right-middle side of the screen
+                            val bubbleDpSize = when (downloadBubbleSize) {
+                                "Small" -> 44.dp
+                                "Large" -> 72.dp
+                                else -> 56.dp
+                            }
+                            val iconDpSize = when (downloadBubbleSize) {
+                                "Small" -> 22.dp
+                                "Large" -> 36.dp
+                                else -> 28.dp
+                            }
+                            val configuration = LocalConfiguration.current
+                            val density = LocalDensity.current
+
                             androidx.compose.animation.AnimatedVisibility(
-                                visible = currentDetectedResources.isNotEmpty(),
+                                visible = downloadBubbleEnabled && currentDetectedResources.isNotEmpty(),
                                 enter = fadeIn(animationSpec = androidx.compose.animation.core.tween(200)) + scaleIn(animationSpec = androidx.compose.animation.core.tween(200)),
                                 exit = fadeOut(animationSpec = androidx.compose.animation.core.tween(200)) + scaleOut(animationSpec = androidx.compose.animation.core.tween(200)),
                                 modifier = Modifier
@@ -1165,10 +1290,72 @@ fun MainAppContent(
                             ) {
                                 Card(
                                     modifier = Modifier
-                                        .size(56.dp)
-                                        .clickable {
-                                            showDetectedResourcesSheet = true
+                                        .offset {
+                                            IntOffset(
+                                                MainActivity.floatingButtonDragX.roundToInt(),
+                                                MainActivity.floatingButtonDragY.roundToInt()
+                                            )
                                         }
+                                        .alpha(downloadBubbleAlpha)
+                                        .pointerInput(downloadBubbleSnap, configuration.screenWidthDp, density, bubbleDpSize) {
+                                            val screenWidthPx = with(this) { (configuration.screenWidthDp.dp - bubbleDpSize - 32.dp).toPx() }
+                                            awaitPointerEventScope {
+                                                while (true) {
+                                                    val down = awaitFirstDown()
+                                                    var dragTriggered = false
+                                                    var totalDragX = 0f
+                                                    var totalDragY = 0f
+                                                    val dragPointerId = down.id
+                                                    
+                                                    while (true) {
+                                                        val event = awaitPointerEvent()
+                                                        val anyActive = event.changes.any { it.pressed }
+                                                        if (!anyActive) {
+                                                            if (!dragTriggered) {
+                                                                 showDetectedResourcesSheet = true
+                                                            } else {
+                                                                if (downloadBubbleSnap) {
+                                                                    val targetX = if (MainActivity.floatingButtonDragX < -screenWidthPx / 2f) {
+                                                                        -screenWidthPx
+                                                                    } else {
+                                                                        0f
+                                                                    }
+                                                                    MainActivity.floatingButtonDragX = targetX
+                                                                }
+                                                            }
+                                                            break
+                                                        }
+                                                        
+                                                        val change = event.changes.firstOrNull { it.id == dragPointerId }
+                                                        if (change != null) {
+                                                            if (change.pressed) {
+                                                                val positionChange = change.position - change.previousPosition
+                                                                totalDragX += positionChange.x
+                                                                totalDragY += positionChange.y
+                                                                
+                                                                val distanceSquared = totalDragX * totalDragX + totalDragY * totalDragY
+                                                                val slop = viewConfiguration.touchSlop
+                                                                if (!dragTriggered && distanceSquared > slop * slop) {
+                                                                    dragTriggered = true
+                                                                }
+                                                                
+                                                                if (dragTriggered) {
+                                                                    change.consume()
+                                                                    MainActivity.floatingButtonDragX += positionChange.x
+                                                                    MainActivity.floatingButtonDragY += positionChange.y
+                                                                }
+                                                            } else {
+                                                                if (!dragTriggered) {
+                                                                    showDetectedResourcesSheet = true
+                                                                }
+                                                                break
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        .size(bubbleDpSize)
                                         .testTag("floating_download_resources_btn"),
                                     shape = CircleShape,
                                     colors = CardDefaults.cardColors(
@@ -1184,7 +1371,7 @@ fun MainAppContent(
                                             imageVector = Icons.Default.CloudUpload,
                                             contentDescription = "Detected Downloads",
                                             tint = Color(0xFF131317),
-                                            modifier = Modifier.size(28.dp)
+                                            modifier = Modifier.size(iconDpSize)
                                         )
                                     }
                                 }
@@ -1290,6 +1477,8 @@ fun MainAppContent(
                     LaunchedEffect(currentDetectedResources, activeDuration, selectedTabId, detectedAllResourcesList) {
                         isAnalyzingVideo = true
                         isAnalyzingAudio = true
+                        analyzedVideoQualities.clear()
+                        analyzedAudioQualities.clear()
                         val cleanTitle = viewModel.getCleanActiveVideoTitle(selectedTabId)
                         val modifiedResources = currentDetectedResources.map { res ->
                             res.copy(title = cleanTitle)
@@ -1634,25 +1823,45 @@ fun MainAppContent(
                                                         Row(
                                                             modifier = Modifier
                                                                 .fillMaxWidth()
-                                                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                                                                .padding(horizontal = 14.dp, vertical = 12.dp),
                                                             verticalAlignment = Alignment.CenterVertically
                                                         ) {
-                                                            Icon(
-                                                                imageVector = Icons.Default.Download,
-                                                                contentDescription = "Download stream",
-                                                                tint = MaterialTheme.colorScheme.primary,
-                                                                modifier = Modifier.size(18.dp)
-                                                            )
-                                                            Spacer(modifier = Modifier.width(10.dp))
+                                                            // Beautiful Circle Icon on the Left
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .size(40.dp)
+                                                                    .background(
+                                                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                                                        shape = RoundedCornerShape(10.dp)
+                                                                    ),
+                                                                contentAlignment = Alignment.Center
+                                                            ) {
+                                                                Icon(
+                                                                    imageVector = Icons.Default.Download,
+                                                                    contentDescription = "Download stream",
+                                                                    tint = MaterialTheme.colorScheme.primary,
+                                                                    modifier = Modifier.size(20.dp)
+                                                                )
+                                                            }
+                                                            
+                                                            Spacer(modifier = Modifier.width(12.dp))
+                                                            
                                                             Column(modifier = Modifier.weight(1f)) {
-                                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                                // Use FlowRow to wrap elements beautifully & dynamically!
+                                                                @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+                                                                FlowRow(
+                                                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                                                    modifier = Modifier.fillMaxWidth()
+                                                                ) {
                                                                     Text(
                                                                         text = option.resolution,
                                                                         fontSize = 15.sp,
                                                                         fontWeight = FontWeight.Bold,
                                                                         color = MaterialTheme.colorScheme.onSurface
                                                                     )
-                                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                                    
+                                                                    // Quality Category Badge
                                                                     Surface(
                                                                         color = badgeBgColor,
                                                                         shape = RoundedCornerShape(4.dp)
@@ -1665,28 +1874,85 @@ fun MainAppContent(
                                                                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                                                         )
                                                                     }
+                                                                    
+                                                                    // Format Badge
+                                                                    Surface(
+                                                                        color = MaterialTheme.colorScheme.secondaryContainer,
+                                                                        shape = RoundedCornerShape(4.dp)
+                                                                    ) {
+                                                                        Text(
+                                                                            text = option.format.uppercase(),
+                                                                            fontSize = 9.sp,
+                                                                            fontWeight = FontWeight.Bold,
+                                                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                        )
+                                                                    }
+                                                                    
+                                                                    // Codec Badge
+                                                                    option.codec?.let { codecName ->
+                                                                        Surface(
+                                                                            color = MaterialTheme.colorScheme.tertiaryContainer,
+                                                                            shape = RoundedCornerShape(4.dp)
+                                                                        ) {
+                                                                            Text(
+                                                                                text = codecName,
+                                                                                fontSize = 9.sp,
+                                                                                fontWeight = FontWeight.Bold,
+                                                                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                                            )
+                                                                        }
+                                                                    }
                                                                 }
-                                                                Spacer(modifier = Modifier.height(2.dp))
+                                                                
+                                                                Spacer(modifier = Modifier.height(4.dp))
+                                                                
+                                                                // Subtitle Metadata Row
                                                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                                                     Text(
                                                                         text = option.displaySize,
                                                                         fontSize = 12.sp,
                                                                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                                                                     )
+                                                                    
+                                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                                    
+                                                                    val sizeTypeLabel = if (option.isEstimated) "Estimated" else "Actual"
+                                                                    val sizeTypeColor = if (option.isEstimated) androidx.compose.ui.graphics.Color(0xFFFF9800) else androidx.compose.ui.graphics.Color(0xFF4CAF50)
+                                                                    
+                                                                    Surface(
+                                                                        color = sizeTypeColor.copy(alpha = 0.12f),
+                                                                        shape = RoundedCornerShape(4.dp)
+                                                                    ) {
+                                                                        Text(
+                                                                            text = sizeTypeLabel,
+                                                                            fontSize = 8.sp,
+                                                                            fontWeight = FontWeight.Bold,
+                                                                            color = sizeTypeColor,
+                                                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                                        )
+                                                                    }
+                                                                    
                                                                     Spacer(modifier = Modifier.width(8.dp))
+                                                                    
                                                                     Text(
                                                                         text = "•",
                                                                         fontSize = 12.sp,
                                                                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
                                                                     )
+                                                                    
                                                                     Spacer(modifier = Modifier.width(8.dp))
+                                                                    
                                                                     Icon(
                                                                         imageVector = audioIcon,
                                                                         contentDescription = audioDescription,
                                                                         tint = audioTintColor,
                                                                         modifier = Modifier.size(12.dp)
                                                                     )
+                                                                    
                                                                     Spacer(modifier = Modifier.width(4.dp))
+                                                                    
                                                                     Text(
                                                                         text = audioDescription,
                                                                         fontSize = 11.sp,
@@ -1695,18 +1961,15 @@ fun MainAppContent(
                                                                 }
                                                             }
                                                             
-                                                            Surface(
-                                                                color = MaterialTheme.colorScheme.secondaryContainer,
-                                                                shape = RoundedCornerShape(6.dp)
-                                                            ) {
-                                                                Text(
-                                                                    text = option.format.uppercase(),
-                                                                    fontSize = 9.sp,
-                                                                    fontWeight = FontWeight.Bold,
-                                                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                                                                )
-                                                            }
+                                                            Spacer(modifier = Modifier.width(10.dp))
+                                                            
+                                                            // Beautiful chevron action indicator on the far right
+                                                            Icon(
+                                                                imageVector = Icons.Default.ChevronRight,
+                                                                contentDescription = "Select option",
+                                                                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
+                                                                modifier = Modifier.size(20.dp)
+                                                            )
                                                         }
                                                     }
                                                 }
@@ -1838,11 +2101,28 @@ fun MainAppContent(
                                                                         }
                                                                     }
                                                                     Spacer(modifier = Modifier.height(2.dp))
-                                                                    Text(
-                                                                        text = option.displaySize,
-                                                                        fontSize = 12.sp,
-                                                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                                                    )
+                                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                                        Text(
+                                                                            text = option.displaySize,
+                                                                            fontSize = 12.sp,
+                                                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                                                        )
+                                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                                        val sizeTypeLabel = if (option.isEstimated) "Estimated Size" else "Actual Size"
+                                                                        val sizeTypeColor = if (option.isEstimated) androidx.compose.ui.graphics.Color(0xFFFF9800) else androidx.compose.ui.graphics.Color(0xFF4CAF50)
+                                                                        Surface(
+                                                                            color = sizeTypeColor.copy(alpha = 0.12f),
+                                                                            shape = RoundedCornerShape(4.dp)
+                                                                        ) {
+                                                                            Text(
+                                                                                text = sizeTypeLabel,
+                                                                                fontSize = 8.sp,
+                                                                                fontWeight = FontWeight.Bold,
+                                                                                color = sizeTypeColor,
+                                                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                                            )
+                                                                        }
+                                                                    }
                                                                 }
                                                                 
                                                                 Surface(
